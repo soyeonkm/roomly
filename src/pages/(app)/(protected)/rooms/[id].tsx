@@ -109,14 +109,16 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
     [editable, sel, rotate],
   )
 
-  const resizeSel = useCallback(
-    (width: number, height: number) => {
-      if (!editable || !sel || (width === sel.width && height === sel.height)) return
+  // By id, not "the selection": a draft committed on unmount lands after the selection moved on.
+  const resizeItem = useCallback(
+    (id: string, width: number, height: number) => {
+      const it = liveItems.find((i) => i.id === id)
+      if (!editable || !it || (width === it.width && height === it.height)) return
       // Keep the center, then pull it back inside the walls if the new size pokes out.
-      const c = placeCenter({ width, height, rot: sel.rot }, sel.x, sel.y, dims, false)
-      resize(sel.id, width, height, c.x, c.y)
+      const c = placeCenter({ width, height, rot: it.rot }, it.x, it.y, dims, false)
+      resize(id, width, height, c.x, c.y)
     },
-    [editable, sel, dims, resize],
+    [editable, liveItems, dims, resize],
   )
 
   const deleteSel = useCallback(() => {
@@ -245,7 +247,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
         {/* Properties */}
         <aside aria-label="Properties" className="overflow-y-auto border-t border-border bg-card/50 p-4 lg:border-l lg:border-t-0">
           {sel ? (
-            <ItemPanel item={sel} issues={issues} items={liveItems} editable={editable} onRotate={rotateSel} onResize={resizeSel} onDelete={deleteSel} onSelect={setSelected} />
+            <ItemPanel item={sel} issues={issues} items={liveItems} editable={editable} onRotate={rotateSel} onResize={resizeItem} onDelete={deleteSel} onSelect={setSelected} />
           ) : (
             <RoomPanel roomId={roomId} room={room} editable={roomMut.ready} issues={issues} items={liveItems} onSelect={setSelected} />
           )}
@@ -469,7 +471,7 @@ function DimLabel({ x1, y1, x2, y2, label, fontCm, vertical }: { x1: number; y1:
 
 function ItemPanel({ item, issues, items, editable, onRotate, onResize, onDelete, onSelect }: {
   item: Item; issues: ReturnType<typeof findIssues>; items: Item[]; editable: boolean
-  onRotate: (dir: 1 | -1) => void; onResize: (width: number, height: number) => void
+  onRotate: (dir: 1 | -1) => void; onResize: (id: string, width: number, height: number) => void
   onDelete: () => void; onSelect: (id: string) => void
 }) {
   const { w, h } = footprintSize(item)
@@ -489,7 +491,7 @@ function ItemPanel({ item, issues, items, editable, onRotate, onResize, onDelete
         <Stat label="From top" value={`${Math.round(b.top)} cm`} />
         <Stat label="Rotation" value={`${item.rot}°`} testId="item-rotation" />
       </dl>
-      <SizeFields item={item} editable={editable} onResize={onResize} />
+      <SizeFields key={item.id} item={item} editable={editable} onResize={onResize} />
       <div className="grid grid-cols-2 gap-2">
         <Button variant="outline" disabled={!editable} onClick={() => onRotate(-1)} aria-label="Rotate left"><RotateCcw /> 90°</Button>
         <Button variant="outline" disabled={!editable} onClick={() => onRotate(1)} aria-label="Rotate right" data-testid="rotate-right"><RotateCw /> 90°</Button>
@@ -562,20 +564,28 @@ function CustomFurnitureButton({ disabled, onAdd }: { disabled: boolean; onAdd: 
   )
 }
 
-/** Unrotated width × depth in cm. Commits on blur / Enter so typing doesn't spam the undo stack. */
-function SizeFields({ item, editable, onResize }: { item: Item; editable: boolean; onResize: (width: number, height: number) => void }) {
+/**
+ * Unrotated width × depth in cm. Commits on blur / Enter so typing doesn't spam the undo stack,
+ * and on unmount: clicking another item or the floor swaps the panel before the input's blur fires.
+ * Keyed by item id, so switching items is an unmount.
+ */
+function SizeFields({ item, editable, onResize }: { item: Item; editable: boolean; onResize: (id: string, width: number, height: number) => void }) {
   const [w, setW] = useState(String(item.width))
   const [h, setH] = useState(String(item.height))
-  // Follow remote edits, undo/redo and selecting another item.
-  useEffect(() => { setW(String(item.width)); setH(String(item.height)) }, [item.id, item.width, item.height])
+  // Follow remote edits and undo/redo.
+  useEffect(() => { setW(String(item.width)); setH(String(item.height)) }, [item.width, item.height])
 
+  const size = () => [parseItemSize(w) ?? item.width, parseItemSize(h) ?? item.height] as const
   function commit() {
-    const nw = parseItemSize(w) ?? item.width
-    const nh = parseItemSize(h) ?? item.height
+    const [nw, nh] = size()
     setW(String(nw))
     setH(String(nh))
-    onResize(nw, nh)
+    onResize(item.id, nw, nh)
   }
+  // Latest draft, for the unmount flush (an effect so cleanup sees the last committed render).
+  const flush = useRef(() => {})
+  useEffect(() => { flush.current = () => onResize(item.id, ...size()) })
+  useEffect(() => () => flush.current(), [])
   const field = (id: string, label: string, value: string, set: (v: string) => void) => (
     <div className="space-y-1.5">
       <Label htmlFor={id}>{label}</Label>

@@ -343,6 +343,21 @@ test('furniture size: panel and canvas agree, input is clamped, walls hold, undo
     await desk.click()
     await expectSize('300', '60')
     await expect(footprint).toHaveText('60 × 300 cm')
+
+    // An edit typed without Enter isn't lost when you click away.
+    await width.fill('280')
+    await page.getByRole('application', { name: 'Room floor plan' }).click({ position: { x: 5, y: 5 } })
+    await expect(page.getByTestId('room-panel')).toBeVisible()
+    await expect(desk).toHaveAttribute('data-width', '280')
+    // ...or when you click straight onto another piece.
+    const chair = page.locator('[data-testid="furniture"][data-kind="chair"]')
+    await chair.click()
+    await expect(width).toHaveValue('50')
+    await width.fill('70')
+    await desk.click()
+    await expect(width).toHaveValue('280')
+    await expect(chair).toHaveAttribute('data-width', '70')
+    await expect(desk).toHaveAttribute('data-width', '280')
   } finally {
     await deleteRooms(page, [name])
   }
