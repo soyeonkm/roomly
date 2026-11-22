@@ -5,6 +5,7 @@ import { Plus, Ruler, Trash2, Users } from 'lucide-react'
 import { Button, Input, Label, useToast } from '@/components/ui'
 import { formatM, parseRoomDims } from '@/lib/room-geometry'
 import type { Room } from '@/schemas/rooms-schema'
+import type { RoomVisit } from '@/schemas/room-visits-schema'
 
 export default function RoomsDashboard() {
   const { userId } = useAuthProfileReady()
@@ -14,6 +15,7 @@ export default function RoomsDashboard() {
   // not private, so this leaks nothing new. Add a server-side `where` when lists grow.
   const { records, status, error } = useQuery<Room>('rooms', { orderBy: 'createdAt', orderDir: 'desc' })
   const { ready, createConfirmed, removeConfirmed } = useMutations<Room>('rooms')
+  const visits = useQuery<RoomVisit>('roomVisits')
 
   const [name, setName] = useState('')
   const [widthM, setWidthM] = useState('3.5')
@@ -21,8 +23,15 @@ export default function RoomsDashboard() {
   const [formError, setFormError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
 
+  // Who has opened each room (besides its creator): visit rows, plus the legacy JSON list.
+  const visitors = new Map<string, Set<string>>()
+  for (const r of records) visitors.set(r.recordId, new Set(r.data.collaborators ?? []))
+  for (const v of visits.records) visitors.get(v.data.roomId)?.add(v.createdBy)
+  for (const r of records) visitors.get(r.recordId)!.delete(r.createdBy)
+
   const mine = records.filter((r) => r.createdBy === userId)
-  const shared = records.filter((r) => r.createdBy !== userId && r.data.collaborators?.includes(userId ?? ''))
+  const shared = records.filter((r) => r.createdBy !== userId && visitors.get(r.recordId)!.has(userId ?? ''))
+  const people = (id: string) => (visitors.get(id)?.size ?? 0) + 1
 
   async function onCreate(e: FormEvent) {
     e.preventDefault()
@@ -33,7 +42,7 @@ export default function RoomsDashboard() {
     setFormError(null)
     setCreating(true)
     try {
-      const id = await createConfirmed({ name: trimmed.slice(0, 80), ...dims, collaborators: [] })
+      const id = await createConfirmed({ name: trimmed.slice(0, 80), ...dims })
       navigate(`/rooms/${id}`)
     } catch (err) {
       toast.error('Could not create room', err instanceof Error ? err.message : String(err))
@@ -97,8 +106,8 @@ export default function RoomsDashboard() {
           {status === 'error' && <p className="text-destructive">Couldn't load rooms: {error}</p>}
           {status === 'ready' && (
             <>
-              <RoomGroup title="Created by you" rooms={mine} onDelete={onDelete} canDelete empty="No rooms yet — create your first one." />
-              {shared.length > 0 && <RoomGroup title="Shared with you" rooms={shared} empty="" />}
+              <RoomGroup title="Created by you" rooms={mine} people={people} onDelete={onDelete} canDelete empty="No rooms yet — create your first one." />
+              {shared.length > 0 && <RoomGroup title="Shared with you" rooms={shared} people={people} empty="" />}
             </>
           )}
           <p className="text-xs text-muted-foreground">
@@ -113,9 +122,10 @@ export default function RoomsDashboard() {
 
 type RoomRec = { recordId: string; data: Room; createdAt: string }
 
-function RoomGroup({ title, rooms, empty, canDelete, onDelete }: {
+function RoomGroup({ title, rooms, people, empty, canDelete, onDelete }: {
   title: string
   rooms: RoomRec[]
+  people: (roomId: string) => number
   empty: string
   canDelete?: boolean
   onDelete?: (id: string, name: string) => void
@@ -138,8 +148,8 @@ function RoomGroup({ title, rooms, empty, canDelete, onDelete }: {
                 <div className="mt-3 truncate font-medium text-foreground">{r.data.name}</div>
                 <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
                   <span className="inline-flex items-center gap-1"><Ruler className="size-3.5" />{formatM(r.data.widthCm)} × {formatM(r.data.lengthCm)}</span>
-                  {(r.data.collaborators?.length ?? 0) > 0 && (
-                    <span className="inline-flex items-center gap-1"><Users className="size-3.5" />{(r.data.collaborators?.length ?? 0) + 1}</span>
+                  {people(r.recordId) > 1 && (
+                    <span className="inline-flex items-center gap-1" data-testid="room-people"><Users className="size-3.5" />{people(r.recordId)}</span>
                   )}
                 </div>
               </Link>

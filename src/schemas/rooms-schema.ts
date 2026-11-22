@@ -6,9 +6,9 @@ import type { CollectionSchema } from 'deepspace/schema'
  *
  * Sharing model (MVP): authenticated-link editing. Any signed-in member who
  * has a room's URL can read and edit it; rooms are NOT private. Only the
- * creator can delete. `collaborators` is a convenience list of user ids that
- * have opened the room, used to show it on their dashboard — it is not an
- * access-control list.
+ * creator can delete. Who has opened a room lives in `roomVisits` (one row
+ * per user, see room-visits-schema.ts). `collaborators` is legacy: no longer
+ * written, still read so rooms visited before roomVisits existed keep showing.
  */
 export const roomsSchema: CollectionSchema = {
   name: 'rooms',

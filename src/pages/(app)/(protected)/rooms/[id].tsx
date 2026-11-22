@@ -13,6 +13,7 @@ import {
 } from '@/lib/room-geometry'
 import { useRoomCanvas } from '@/lib/use-room-canvas'
 import type { Room } from '@/schemas/rooms-schema'
+import { visitIdFor, type RoomVisit } from '@/schemas/room-visits-schema'
 
 type Pt = { x: number; y: number }
 type DragState = { id: string; x: number; y: number; rot: Rot }
@@ -45,6 +46,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
   const { items, connected, canWrite, add, move, rotate, resize, remove, undo, redo } = useRoomCanvas(roomId)
   const { peers, updateState, connected: presenceConnected } = usePresenceRoom(`room:${roomId}`)
   const roomMut = useMutations<Room>('rooms')
+  const visitMut = useMutations<RoomVisit>('roomVisits')
   const editable = connected && canWrite
 
   const [selected, setSelected] = useState<string | null>(null)
@@ -56,15 +58,14 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
   const L = Math.min(Math.max(room.lengthCm, 100), 3000)
   const dims = useMemo(() => ({ widthCm: W, lengthCm: L }), [W, L])
 
-  // Record that this user opened the room, so it shows on their dashboard.
+  // Record that this user opened the room, so it shows on their dashboard. Each visitor
+  // writes only their own row, so simultaneous first visits can't overwrite each other.
   const joined = useRef(false)
   useEffect(() => {
-    if (joined.current || !roomMut.ready || !userId || userId === createdBy) return
-    const c = room.collaborators ?? []
+    if (joined.current || !visitMut.ready || !userId || userId === createdBy) return
     joined.current = true
-    // ponytail: read-modify-write on a JSON list; two simultaneous first visits can drop one id.
-    if (!c.includes(userId)) roomMut.put(roomId, { collaborators: [...c, userId] })
-  }, [roomMut, userId, createdBy, room.collaborators, roomId])
+    visitMut.put(visitIdFor(roomId, userId), { roomId }).catch(() => { joined.current = false })
+  }, [visitMut, userId, createdBy, roomId])
 
   // One live position per item: local drag > a peer's in-flight drag > canvas.
   const uniquePeers = useMemo(() => {

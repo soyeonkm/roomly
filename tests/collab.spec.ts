@@ -237,6 +237,60 @@ test('layout persists across refresh, and separate rooms do not share furniture'
   }
 })
 
+test('visitors are counted once each and see the room under "Shared with you"', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [a, b] = await users(2)
+  const name = testName('Visits room')
+  try {
+    const id = await createRoom(a.page, name)
+    await waitEditable(a.page)
+    // Creator alone: no people badge.
+    await a.page.goto('/rooms')
+    const aCard = a.page.getByTestId('room-card').filter({ hasText: name })
+    await expect(aCard).toBeVisible({ timeout: 15_000 })
+    await expect(aCard.getByTestId('room-people')).toHaveCount(0)
+
+    // B visits twice: counted once (the visit write is idempotent).
+    for (let i = 0; i < 2; i++) {
+      await b.page.goto(`/rooms/${id}`)
+      await waitEditable(b.page)
+    }
+    await expect(aCard.getByTestId('room-people')).toHaveText('2', { timeout: 15_000 })
+    await b.page.goto('/rooms')
+    await expect(b.page.getByTestId('room-card').filter({ hasText: name })).toBeVisible({ timeout: 15_000 })
+    await a.page.reload()
+    await expect(aCard.getByTestId('room-people')).toHaveText('2', { timeout: 15_000 })
+  } finally {
+    await deleteRooms(a.page, [name])
+  }
+})
+
+test('two first visits at the same moment are both recorded (no lost update)', async ({ users }) => {
+  test.skip(
+    loadAllTestAccounts().length < 3,
+    'Needs 3 test accounts (creator + 2 simultaneous visitors). Add one with `npx deepspace test accounts create`.',
+  )
+  test.setTimeout(120_000)
+  const [a, b, c] = await users(3)
+  const name = testName('Race room')
+  try {
+    const id = await createRoom(a.page, name)
+    await waitEditable(a.page)
+    await a.page.goto('/rooms')
+    // Both open the room at once — the old JSON-list write could keep only one of them.
+    await Promise.all([b.page.goto(`/rooms/${id}`), c.page.goto(`/rooms/${id}`)])
+    await Promise.all([waitEditable(b.page), waitEditable(c.page)])
+    const aCard = a.page.getByTestId('room-card').filter({ hasText: name })
+    await expect(aCard.getByTestId('room-people')).toHaveText('3', { timeout: 15_000 })
+    for (const u of [b, c]) {
+      await u.page.goto('/rooms')
+      await expect(u.page.getByTestId('room-card').filter({ hasText: name })).toBeVisible({ timeout: 15_000 })
+    }
+  } finally {
+    await deleteRooms(a.page, [name])
+  }
+})
+
 test('undo reverts the last move for the user who made it', async ({ users }) => {
   test.setTimeout(90_000)
   const [a] = await users(1)
