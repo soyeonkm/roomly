@@ -558,8 +558,8 @@ function ItemPanel({ item, issues, items, editable, onRotate, onFlip, onResize, 
           ? <Stat label="Wall" value={WALL_NAMES[item.rot]} testId="item-wall" />
           : <Stat label="Rotation" value={`${item.rot}°`} testId="item-rotation" />}
       </dl>
-      {item.kind === 'custom' && <NameField key={item.id} item={item} editable={editable} onRename={onRename} />}
-      <SizeFields key={item.id} item={item} editable={editable} onResize={onResize} widthOnly={isOpening(item.kind)} />
+      {item.kind === 'custom' && <NameField key={`name-${item.id}`} item={item} editable={editable} onRename={onRename} />}
+      <SizeFields key={`size-${item.id}`} item={item} editable={editable} onResize={onResize} widthOnly={isOpening(item.kind)} />
       {item.kind === 'door' ? (
         <Button variant="outline" className="w-full" disabled={!editable} onClick={onFlip} data-testid="flip-door"><FlipHorizontal2 /> Flip swing</Button>
       ) : !isOpening(item.kind) && (

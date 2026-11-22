@@ -67,6 +67,8 @@ test('API status page renders loading success and error states', async ({ users 
   const [user] = await users(1)
   let shouldFail = false
   let requestCount = 0
+  let release!: () => void
+  const firstLoadSeen = new Promise<void>((r) => (release = r))
 
   await user.page.route('**/api/integrations', async (route) => {
     requestCount += 1
@@ -79,7 +81,7 @@ test('API status page renders loading success and error states', async ({ users 
       return
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    await firstLoadSeen // hold the response until the loading state has been asserted
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -88,7 +90,8 @@ test('API status page renders loading success and error states', async ({ users 
   })
 
   await user.page.goto('/api-status')
-  await expect(user.page.getByText('Loading integration catalog...')).toBeVisible()
+  await expect(user.page.getByText('Loading integration catalog...')).toBeVisible({ timeout: 15_000 })
+  release()
   await expect(user.page.getByText('Integration catalog ready')).toBeVisible()
   await expect(user.page.getByText('2 integrations available.')).toBeVisible()
 
