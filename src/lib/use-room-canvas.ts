@@ -14,11 +14,11 @@ import { canvasIdFor, cleanLabel, isKind, labelFor, normRot, type Item, type Ite
  * room stays the only source of truth.
  */
 
-type Fields = { x?: number; y?: number; rot?: Rot; width?: number; height?: number }
+type Fields = { x?: number; y?: number; rot?: Rot; width?: number; height?: number; label?: string }
 type Pending = Record<string, { fields: Fields; base: Required<Fields> }>
 
 const serverFields = (s: CanvasShapeClient): Required<Fields> => ({
-  x: s.x, y: s.y, rot: normRot(s.props?.rot), width: s.width, height: s.height,
+  x: s.x, y: s.y, rot: normRot(s.props?.rot), width: s.width, height: s.height, label: cleanLabel(s.props?.label),
 })
 
 function toItem(s: CanvasShapeClient, p?: Pending[string]): Item | null {
@@ -29,10 +29,10 @@ function toItem(s: CanvasShapeClient, p?: Pending[string]): Item | null {
   if (p) {
     for (const k of Object.keys(p.fields) as (keyof Fields)[]) {
       // Only apply our write while the server still holds the value we overwrote.
-      if (server[k] === p.base[k]) (live as Record<string, number>)[k] = p.fields[k]!
+      if (server[k] === p.base[k]) (live as Record<string, unknown>)[k] = p.fields[k]
     }
   }
-  return { id: s.id, kind, label: labelFor(kind, s.props?.label), ...live }
+  return { id: s.id, kind, ...live, label: labelFor(kind, live.label) }
 }
 
 export function useRoomCanvas(roomId: string) {
@@ -129,6 +129,15 @@ export function useRoomCanvas(roomId: string) {
     [remember, resizeShape],
   )
 
+  /** Custom items only; the name lives in props, like rotation. */
+  const rename = useCallback(
+    (id: string, label: string) => {
+      remember(id, { label })
+      updateShape(id, { label })
+    },
+    [remember, updateShape],
+  )
+
   const undoOne = useCallback(() => { awaitingSnapshot.current = true; undo() }, [undo])
   const redoOne = useCallback(() => { awaitingSnapshot.current = true; redo() }, [redo])
 
@@ -140,6 +149,7 @@ export function useRoomCanvas(roomId: string) {
     move,
     rotate,
     resize,
+    rename,
     remove: deleteShape,
     undo: undoOne,
     redo: redoOne,

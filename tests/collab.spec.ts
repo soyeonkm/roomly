@@ -465,11 +465,42 @@ test('custom furniture: user names it and sets its size (default 120 × 60); it 
     await a.page.getByTestId('item-width').fill('150')
     await a.page.getByTestId('item-width').press('Enter')
     await expect(piano).toHaveAttribute('data-width', '150')
+
+    // Rename from the panel: canvas, panel and the peer follow; undo restores the old name.
+    const nameInput = a.page.getByTestId('item-name')
+    await expect(nameInput).toHaveValue('Piano')
+    await nameInput.fill('Upright piano')
+    await nameInput.press('Enter')
+    await expect(a.page.getByTestId('item-label')).toHaveText('Upright piano')
+    await expect(custom(a.page).filter({ hasText: 'Upright piano' })).toHaveCount(1)
+    await expect(custom(b.page).filter({ hasText: 'Upright piano' })).toHaveCount(1, { timeout: 10_000 })
+    await a.page.getByRole('button', { name: 'Undo' }).click()
+    await expect(a.page.getByTestId('item-label')).toHaveText('Piano', { timeout: 10_000 })
+    await expect(nameInput).toHaveValue('Piano')
+    await expect(custom(b.page).filter({ hasText: /^Piano$/ })).toHaveCount(1, { timeout: 10_000 })
+
+    // Blank reverts; a name typed without Enter is kept when clicking away.
+    await nameInput.fill('   ')
+    await nameInput.press('Enter')
+    await expect(nameInput).toHaveValue('Piano')
+    await nameInput.fill('Grand piano')
+    await a.page.getByRole('application', { name: 'Room floor plan' }).click({ position: { x: 5, y: 5 } })
+    await expect(a.page.getByTestId('room-panel')).toBeVisible()
+    const grand = custom(a.page).filter({ hasText: 'Grand piano' })
+    await expect(grand).toHaveCount(1)
+    await expect(custom(b.page).filter({ hasText: 'Grand piano' })).toHaveCount(1, { timeout: 10_000 })
+
+    // Presets have no name field.
+    await a.page.getByTestId('add-chair').click()
+    await expect(a.page.getByTestId('item-panel')).toBeVisible()
+    await expect(nameInput).toHaveCount(0)
+    await a.page.getByTestId('delete-item').click()
+
     await a.page.reload()
     await expect(custom(a.page)).toHaveCount(2, { timeout: 15_000 })
-    await expect(piano).toHaveAttribute('data-width', '150')
-    await piano.click()
-    await expect(a.page.getByTestId('item-label')).toHaveText('Piano')
+    await expect(grand).toHaveAttribute('data-width', '150')
+    await grand.click()
+    await expect(a.page.getByTestId('item-label')).toHaveText('Grand piano')
   } finally {
     await deleteRooms(a.page, [name])
   }

@@ -43,7 +43,7 @@ export default function RoomEditorPage() {
 function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; createdBy: string }) {
   const toast = useToast()
   const { userId } = useAuthProfileReady()
-  const { items, connected, canWrite, add, move, rotate, resize, remove, undo, redo } = useRoomCanvas(roomId)
+  const { items, connected, canWrite, add, move, rotate, resize, rename, remove, undo, redo } = useRoomCanvas(roomId)
   const { peers, updateState, connected: presenceConnected } = usePresenceRoom(`room:${roomId}`)
   const roomMut = useMutations<Room>('rooms')
   const visitMut = useMutations<RoomVisit>('roomVisits')
@@ -120,6 +120,16 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
       resize(id, width, height, c.x, c.y)
     },
     [editable, liveItems, dims, resize],
+  )
+
+  const renameItem = useCallback(
+    (id: string, name: string) => {
+      const it = liveItems.find((i) => i.id === id)
+      const label = cleanLabel(name)
+      if (!editable || !it || it.kind !== 'custom' || !label || label === it.label) return
+      rename(id, label)
+    },
+    [editable, liveItems, rename],
   )
 
   const deleteSel = useCallback(() => {
@@ -248,7 +258,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
         {/* Properties */}
         <aside aria-label="Properties" className="overflow-y-auto border-t border-border bg-card/50 p-4 lg:border-l lg:border-t-0">
           {sel ? (
-            <ItemPanel item={sel} issues={issues} items={liveItems} editable={editable} onRotate={rotateSel} onResize={resizeItem} onDelete={deleteSel} onSelect={setSelected} />
+            <ItemPanel item={sel} issues={issues} items={liveItems} editable={editable} onRotate={rotateSel} onResize={resizeItem} onRename={renameItem} onDelete={deleteSel} onSelect={setSelected} />
           ) : (
             <RoomPanel roomId={roomId} room={room} editable={roomMut.ready} issues={issues} items={liveItems} onSelect={setSelected} />
           )}
@@ -470,9 +480,10 @@ function DimLabel({ x1, y1, x2, y2, label, fontCm, vertical }: { x1: number; y1:
   )
 }
 
-function ItemPanel({ item, issues, items, editable, onRotate, onResize, onDelete, onSelect }: {
+function ItemPanel({ item, issues, items, editable, onRotate, onResize, onRename, onDelete, onSelect }: {
   item: Item; issues: ReturnType<typeof findIssues>; items: Item[]; editable: boolean
   onRotate: (dir: 1 | -1) => void; onResize: (id: string, width: number, height: number) => void
+  onRename: (id: string, name: string) => void
   onDelete: () => void; onSelect: (id: string) => void
 }) {
   const { w, h } = footprintSize(item)
@@ -492,6 +503,7 @@ function ItemPanel({ item, issues, items, editable, onRotate, onResize, onDelete
         <Stat label="From top" value={`${Math.round(b.top)} cm`} />
         <Stat label="Rotation" value={`${item.rot}°`} testId="item-rotation" />
       </dl>
+      {item.kind === 'custom' && <NameField key={item.id} item={item} editable={editable} onRename={onRename} />}
       <SizeFields key={item.id} item={item} editable={editable} onResize={onResize} />
       <div className="grid grid-cols-2 gap-2">
         <Button variant="outline" disabled={!editable} onClick={() => onRotate(-1)} aria-label="Rotate left"><RotateCcw /> 90°</Button>
@@ -565,6 +577,31 @@ function CustomFurnitureButton({ disabled, onAdd }: { disabled: boolean; onAdd: 
   )
 }
 
+/** Run the latest `fn` on unmount (ref set in an effect, so cleanup sees the last committed render). */
+function useFlushOnUnmount(fn: () => void) {
+  const latest = useRef(fn)
+  useEffect(() => { latest.current = fn })
+  useEffect(() => () => latest.current(), [])
+}
+
+/** Rename a custom item. Same commit rules as SizeFields: Enter, blur, or unmount; blank reverts. */
+function NameField({ item, editable, onRename }: { item: Item; editable: boolean; onRename: (id: string, name: string) => void }) {
+  const [name, setName] = useState(item.label)
+  useEffect(() => { setName(item.label) }, [item.label])
+  useFlushOnUnmount(() => onRename(item.id, name))
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor="item-name">Name</Label>
+      <Input
+        id="item-name" data-testid="item-name" maxLength={MAX_LABEL} value={name} disabled={!editable}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={() => { onRename(item.id, name); setName(cleanLabel(name) || item.label) }}
+        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }}
+      />
+    </div>
+  )
+}
+
 /**
  * Unrotated width × depth in cm. Commits on blur / Enter so typing doesn't spam the undo stack,
  * and on unmount: clicking another item or the floor swaps the panel before the input's blur fires.
@@ -583,10 +620,7 @@ function SizeFields({ item, editable, onResize }: { item: Item; editable: boolea
     setH(String(nh))
     onResize(item.id, nw, nh)
   }
-  // Latest draft, for the unmount flush (an effect so cleanup sees the last committed render).
-  const flush = useRef(() => {})
-  useEffect(() => { flush.current = () => onResize(item.id, ...size()) })
-  useEffect(() => () => flush.current(), [])
+  useFlushOnUnmount(() => onResize(item.id, ...size()))
   const field = (id: string, label: string, value: string, set: (v: string) => void) => (
     <div className="space-y-1.5">
       <Label htmlFor={id}>{label}</Label>
