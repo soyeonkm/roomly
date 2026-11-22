@@ -249,3 +249,65 @@ test('undo reverts the last move for the user who made it', async ({ users }) =>
     await deleteRooms(a.page, [name])
   }
 })
+
+test('view-only users (canWrite=false) see live edits but cannot change anything', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [a, b] = await users(2)
+  const name = testName('View-only room')
+  try {
+    const id = await createRoom(a.page, name)
+    await waitEditable(a.page)
+    await a.page.getByTestId('add-bed').click()
+    const aBed = a.page.locator('[data-testid="furniture"][data-kind="bed"]')
+    await expect(aBed).toHaveCount(1)
+
+    // Every signed-in user is a `member` today, so force B's canvas into the
+    // viewer state the server would send: rewrite the AUTH frame to canWrite=false.
+    await b.page.routeWebSocket(/\/ws\/canvas\//, (ws) => {
+      const server = ws.connectToServer()
+      server.onMessage((m) => {
+        if (typeof m === 'string') {
+          const msg = JSON.parse(m)
+          if (msg.type === 'auth') msg.payload.canWrite = false
+          ws.send(JSON.stringify(msg))
+        } else ws.send(m)
+      })
+      ws.onMessage((m) => server.send(m))
+    })
+    await b.page.goto(`/rooms/${id}`)
+    const bBed = b.page.locator('[data-testid="furniture"][data-kind="bed"]')
+    await expect(bBed).toHaveCount(1, { timeout: 15_000 })
+    await expect(b.page.getByTestId('connection-status')).toHaveText('View only', { timeout: 15_000 })
+    await expect(b.page.getByTestId('room-editor')).toHaveAttribute('data-can-write', 'false')
+
+    // Every edit control is disabled.
+    for (const kind of ['bed', 'sofa', 'desk', 'chair', 'dresser', 'rug']) {
+      await expect(b.page.getByTestId(`add-${kind}`)).toBeDisabled()
+    }
+    await expect(b.page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+    await expect(b.page.getByRole('button', { name: 'Redo' })).toBeDisabled()
+
+    // B can still select (to inspect), but rotate/delete are disabled and drag/keys do nothing.
+    const x0 = await bBed.getAttribute('data-x')
+    await dragBy(b.page, bBed, 120, 0)
+    await expect(b.page.getByTestId('item-panel')).toBeVisible()
+    await expect(b.page.getByTestId('rotate-right')).toBeDisabled()
+    await expect(b.page.getByTestId('delete-item')).toBeDisabled()
+    await b.page.keyboard.press('r')
+    await b.page.keyboard.press('Delete')
+    await b.page.keyboard.press('ArrowRight')
+    await b.page.waitForTimeout(1000)
+    await expect(bBed).toHaveAttribute('data-x', x0!)
+    await expect(bBed).toHaveAttribute('data-rot', '0')
+    await expect(bBed).toHaveCount(1)
+    // ...and nothing B tried reached A.
+    await expect(aBed).toHaveAttribute('data-x', x0!)
+    await expect(aBed).toHaveAttribute('data-rot', '0')
+
+    // B still receives A's live edits.
+    await a.page.getByTestId('rotate-right').click()
+    await expect(bBed).toHaveAttribute('data-rot', '90', { timeout: 10_000 })
+  } finally {
+    await deleteRooms(a.page, [name])
+  }
+})
