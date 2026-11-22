@@ -259,6 +259,222 @@ test('undo reverts the last move for the user who made it', async ({ users }) =>
   }
 })
 
+test('furniture size: panel and canvas agree, input is clamped, walls hold, undo and reload keep it', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [a] = await users(1)
+  const name = testName('Resize room')
+  const page = a.page
+  const width = page.getByTestId('item-width')
+  const depth = page.getByTestId('item-depth')
+  const footprint = page.getByTestId('item-footprint')
+  const desk = page.locator('[data-testid="furniture"][data-kind="desk"]')
+  const setSize = async (input: typeof width, v: string) => { await input.fill(v); await input.press('Enter') }
+  const expectSize = async (w: string, h: string) => {
+    await expect(desk).toHaveAttribute('data-width', w)
+    await expect(desk).toHaveAttribute('data-height', h)
+    await expect(width).toHaveValue(w)
+    await expect(depth).toHaveValue(h)
+  }
+  try {
+    await createRoom(page, name) // 4 m × 3.5 m
+    await waitEditable(page)
+    await page.getByTestId('add-desk').click()
+
+    // Preset size shows identically in the inputs, the footprint label and the canvas.
+    await expectSize('120', '60')
+    await expect(footprint).toHaveText('120 × 60 cm')
+    await expect(desk).toHaveAttribute('data-x', '200')
+
+    // Growing keeps the center when it still fits.
+    await setSize(width, '200')
+    await expectSize('200', '60')
+    await expect(footprint).toHaveText('200 × 60 cm')
+    await expect(desk).toHaveAttribute('data-x', '200')
+
+    // Out-of-range clamps; blank reverts to the current size.
+    await setSize(width, '3')
+    await expectSize('10', '60')
+    await setSize(depth, '99999')
+    await expectSize('10', '3000')
+    await setSize(depth, '')
+    await expectSize('10', '3000')
+    await setSize(width, '200')
+    await setSize(depth, '60')
+    await expectSize('200', '60')
+
+    // Push it against the right wall, then grow it: it's pulled back inside, never past the wall.
+    for (let i = 0; i < 4; i++) await page.keyboard.press('Shift+ArrowRight')
+    await expect(desk).toHaveAttribute('data-x', '300')
+    await setSize(width, '300')
+    await expectSize('300', '60')
+    await expect(desk).toHaveAttribute('data-x', '250') // right edge 400 = room width
+    await expect(page.getByText('Extends past the walls.')).toHaveCount(0)
+
+    // Rotation swaps the footprint, not the item's own width/depth.
+    await page.getByTestId('rotate-right').click()
+    await expect(desk).toHaveAttribute('data-rot', '90')
+    await expectSize('300', '60')
+    await expect(footprint).toHaveText('60 × 300 cm')
+
+    // Undo rotate, then undo resize (size and the wall pull-in revert together); redo both.
+    await page.getByRole('button', { name: 'Undo' }).click()
+    await expect(desk).toHaveAttribute('data-rot', '0', { timeout: 10_000 })
+    await page.getByRole('button', { name: 'Undo' }).click()
+    await expect(desk).toHaveAttribute('data-width', '200', { timeout: 10_000 })
+    await expect(desk).toHaveAttribute('data-x', '300')
+    await expect(width).toHaveValue('200')
+    await page.getByRole('button', { name: 'Redo' }).click()
+    await expect(desk).toHaveAttribute('data-width', '300', { timeout: 10_000 })
+    await expect(desk).toHaveAttribute('data-x', '250')
+    await page.getByRole('button', { name: 'Redo' }).click()
+    await expect(desk).toHaveAttribute('data-rot', '90', { timeout: 10_000 })
+
+    // Switching selection shows each item's own size.
+    await page.getByTestId('add-chair').click()
+    await expect(width).toHaveValue('50')
+    await expect(depth).toHaveValue('50')
+
+    // Reload: size comes back from the CanvasRoom, and the panel matches.
+    await page.reload()
+    await expect(desk).toHaveCount(1, { timeout: 15_000 })
+    await expect(desk).toHaveAttribute('data-width', '300')
+    await expect(desk).toHaveAttribute('data-height', '60')
+    await expect(desk).toHaveAttribute('data-rot', '90')
+    await desk.click()
+    await expectSize('300', '60')
+    await expect(footprint).toHaveText('60 × 300 cm')
+  } finally {
+    await deleteRooms(page, [name])
+  }
+})
+
+test('custom furniture: user names it and sets its size (default 120 × 60); it syncs and persists', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [a, b] = await users(2)
+  const name = testName('Custom room')
+  const custom = (page: typeof a.page) => page.locator('[data-testid="furniture"][data-kind="custom"]')
+  try {
+    const id = await createRoom(a.page, name)
+    await waitEditable(a.page)
+    await b.page.goto(`/rooms/${id}`)
+    await waitEditable(b.page)
+
+    await a.page.getByTestId('add-custom').click()
+    const form = a.page.getByTestId('custom-form')
+    await expect(form.getByLabel('Width (cm)')).toHaveValue('120')
+    await expect(form.getByLabel('Depth (cm)')).toHaveValue('60')
+    // A name is required.
+    await expect(form.getByRole('button', { name: 'Add to room' })).toBeDisabled()
+    await form.getByLabel('Name').fill('  Bookshelf  ')
+    await form.getByLabel('Width (cm)').fill('80')
+    await form.getByLabel('Depth (cm)').fill('30')
+    await form.getByRole('button', { name: 'Add to room' }).click()
+    await expect(form).toBeHidden()
+
+    // Canvas, panel and the peer all agree on name and size.
+    await expect(custom(a.page)).toHaveCount(1)
+    await expect(custom(a.page)).toHaveAttribute('data-width', '80')
+    await expect(custom(a.page)).toHaveAttribute('data-height', '30')
+    await expect(custom(a.page)).toContainText('Bookshelf')
+    await expect(a.page.getByTestId('item-label')).toHaveText('Bookshelf')
+    await expect(a.page.getByTestId('item-width')).toHaveValue('80')
+    await expect(a.page.getByTestId('item-footprint')).toHaveText('80 × 30 cm')
+    await expect(custom(b.page)).toHaveCount(1, { timeout: 10_000 })
+    await expect(custom(b.page)).toContainText('Bookshelf')
+    await expect(custom(b.page)).toHaveAttribute('data-width', '80')
+
+    // A second one with the defaults untouched is 120 × 60; the form reset after the first.
+    await a.page.getByTestId('add-custom').click()
+    await expect(form.getByLabel('Name')).toHaveValue('')
+    await form.getByLabel('Name').fill('Piano')
+    await form.getByRole('button', { name: 'Add to room' }).click()
+    const piano = custom(a.page).filter({ hasText: 'Piano' })
+    await expect(piano).toHaveAttribute('data-width', '120')
+    await expect(piano).toHaveAttribute('data-height', '60')
+
+    // Custom pieces resize like any other, and survive a reload.
+    await a.page.getByTestId('item-width').fill('150')
+    await a.page.getByTestId('item-width').press('Enter')
+    await expect(piano).toHaveAttribute('data-width', '150')
+    await a.page.reload()
+    await expect(custom(a.page)).toHaveCount(2, { timeout: 15_000 })
+    await expect(piano).toHaveAttribute('data-width', '150')
+    await piano.click()
+    await expect(a.page.getByTestId('item-label')).toHaveText('Piano')
+  } finally {
+    await deleteRooms(a.page, [name])
+  }
+})
+
+test('custom furniture form: validation, cancel, names in warnings, undo', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [a] = await users(1)
+  const page = a.page
+  const name = testName('Custom form room')
+  const form = page.getByTestId('custom-form')
+  const custom = page.locator('[data-testid="furniture"][data-kind="custom"]')
+  const submit = form.getByRole('button', { name: 'Add to room' })
+  try {
+    await createRoom(page, name)
+    await waitEditable(page)
+
+    // Whitespace-only names don't count.
+    await page.getByTestId('add-custom').click()
+    await form.getByLabel('Name').fill('    ')
+    await expect(submit).toBeDisabled()
+
+    // Escape cancels: nothing is added.
+    await form.getByLabel('Name').press('Escape')
+    await expect(form).toBeHidden()
+    await expect(custom).toHaveCount(0)
+
+    // Out-of-range size clamps to 10 cm; a blank size falls back to the default.
+    await page.getByTestId('add-custom').click()
+    await form.getByLabel('Name').fill('Lamp')
+    await form.getByLabel('Width (cm)').fill('3')
+    await form.getByLabel('Depth (cm)').fill('')
+    await submit.click()
+    const lamp = custom.filter({ hasText: 'Lamp' })
+    await expect(lamp).toHaveAttribute('data-width', '10')
+    await expect(lamp).toHaveAttribute('data-height', '60')
+
+    // Sizes off the 10 cm grid are allowed (85 × 33).
+    await page.getByTestId('add-custom').click()
+    await form.getByLabel('Name').fill('Stool')
+    await form.getByLabel('Width (cm)').fill('85')
+    await form.getByLabel('Depth (cm)').fill('33')
+    await submit.click()
+    const stool = custom.filter({ hasText: 'Stool' })
+    await expect(stool).toHaveAttribute('data-width', '85')
+    await expect(stool).toHaveAttribute('data-height', '33')
+    await page.getByTestId('delete-item').click()
+    await expect(stool).toHaveCount(0)
+
+    // Long names are capped at 40 characters and keep their case in the panel.
+    await page.getByTestId('add-custom').click()
+    await form.getByLabel('Name').fill('Grandma Piano ' + 'x'.repeat(60))
+    await submit.click()
+    await expect(page.getByTestId('item-label')).toHaveText(/^Grandma Piano x+$/)
+    expect((await page.getByTestId('item-label').textContent())!.length).toBe(40)
+    await expect(page.getByTestId('delete-item')).toContainText('Remove Grandma Piano')
+
+    // Both sit at the room's center, so they overlap; warnings name them as typed.
+    await expect(page.getByText(/Overlaps\s*Lamp/)).toBeVisible()
+    await page.getByRole('application', { name: 'Room floor plan' }).click({ position: { x: 5, y: 5 } }) // deselect
+    await expect(page.getByTestId('layout-warnings')).toContainText('Lamp: overlapping')
+    await expect(page.getByTestId('layout-warnings')).toContainText('Grandma Piano')
+
+    // Undo removes the last custom piece; redo brings it back with its name.
+    await page.getByRole('button', { name: 'Undo' }).click()
+    await expect(custom).toHaveCount(1, { timeout: 10_000 })
+    await page.getByRole('button', { name: 'Redo' }).click()
+    await expect(custom).toHaveCount(2, { timeout: 10_000 })
+    await expect(custom.filter({ hasText: 'Grandma Piano' })).toHaveCount(1)
+  } finally {
+    await deleteRooms(page, [name])
+  }
+})
+
 test('view-only users (canWrite=false) see live edits but cannot change anything', async ({ users }) => {
   test.setTimeout(120_000)
   const [a, b] = await users(2)
@@ -290,7 +506,7 @@ test('view-only users (canWrite=false) see live edits but cannot change anything
     await expect(b.page.getByTestId('room-editor')).toHaveAttribute('data-can-write', 'false')
 
     // Every edit control is disabled.
-    for (const kind of ['bed', 'sofa', 'desk', 'chair', 'dresser', 'rug']) {
+    for (const kind of ['bed', 'sofa', 'desk', 'chair', 'dresser', 'rug', 'custom']) {
       await expect(b.page.getByTestId(`add-${kind}`)).toBeDisabled()
     }
     await expect(b.page.getByRole('button', { name: 'Undo' })).toBeDisabled()
@@ -316,6 +532,15 @@ test('view-only users (canWrite=false) see live edits but cannot change anything
     // B still receives A's live edits.
     await a.page.getByTestId('rotate-right').click()
     await expect(bBed).toHaveAttribute('data-rot', '90', { timeout: 10_000 })
+
+    // Size inputs are read-only for B, but follow A's resize while B has the bed selected.
+    await expect(b.page.getByTestId('item-width')).toBeDisabled()
+    await expect(b.page.getByTestId('item-depth')).toBeDisabled()
+    await a.page.getByTestId('item-width').fill('140')
+    await a.page.getByTestId('item-width').press('Enter')
+    await expect(bBed).toHaveAttribute('data-width', '140', { timeout: 10_000 })
+    await expect(b.page.getByTestId('item-width')).toHaveValue('140')
+    await expect(b.page.getByTestId('item-footprint')).toHaveText('200 × 140 cm') // rotated 90°
   } finally {
     await deleteRooms(a.page, [name])
   }

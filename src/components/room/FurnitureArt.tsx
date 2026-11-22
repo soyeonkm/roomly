@@ -76,6 +76,13 @@ export function FurnitureArt({ kind, w, h }: { kind: Kind; w: number; h: number 
           <rect x={w * 0.3} y={h * 0.3} width={w * 0.4} height={h * 0.4} rx={h * 0.2} fill="#dfc0a8" />
         </g>
       )
+    case 'custom':
+      return (
+        <g>
+          <rect width={w} height={h} rx={4} fill="#e4dfd6" stroke="#8a8073" strokeWidth={1.25} {...s} />
+          <rect x={Math.min(5, w / 4)} y={Math.min(5, h / 4)} width={Math.max(0, w - Math.min(10, w / 2))} height={Math.max(0, h - Math.min(10, h / 2))} rx={3} fill="none" stroke="#b3a999" strokeDasharray="4 3" strokeWidth={1} {...s} />
+        </g>
+      )
   }
 }
 

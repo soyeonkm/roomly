@@ -7,7 +7,8 @@
  * A canvas shape stores one furniture item:
  *   x, y          — the item's CENTER (so a 90° rotation never moves it)
  *   width, height — the item's unrotated size
- *   props.kind    — preset id, props.rot — 0 | 90 | 180 | 270
+ *   props.kind    — preset id or 'custom', props.rot — 0 | 90 | 180 | 270
+ *   props.label   — custom items only: the user's name for it
  *
  * The screen never appears here: the editor renders an SVG whose viewBox is
  * in cm and converts pointer events with getScreenCTM(), so any screen size
@@ -15,11 +16,13 @@
  */
 
 export type Rot = 0 | 90 | 180 | 270
-export type Kind = 'bed' | 'desk' | 'sofa' | 'chair' | 'dresser' | 'rug'
+export type PresetKind = 'bed' | 'desk' | 'sofa' | 'chair' | 'dresser' | 'rug'
+export type Kind = PresetKind | 'custom'
 
 export type Item = {
   id: string
   kind: Kind
+  label: string
   x: number
   y: number
   width: number
@@ -27,7 +30,7 @@ export type Item = {
   rot: Rot
 }
 
-export type Preset = { kind: Kind; label: string; width: number; height: number; hint: string }
+export type Preset = { kind: PresetKind; label: string; width: number; height: number; hint: string }
 
 export const PRESETS: Preset[] = [
   { kind: 'bed', label: 'Bed', width: 160, height: 200, hint: 'Queen · 160 × 200' },
@@ -38,7 +41,13 @@ export const PRESETS: Preset[] = [
   { kind: 'rug', label: 'Rug', width: 200, height: 140, hint: '200 × 140' },
 ]
 
-export const PRESET_BY_KIND = Object.fromEntries(PRESETS.map((p) => [p.kind, p])) as Record<Kind, Preset>
+export const PRESET_BY_KIND = Object.fromEntries(PRESETS.map((p) => [p.kind, p])) as Record<PresetKind, Preset>
+
+export const CUSTOM_DEFAULT = { width: 120, height: 60 }
+export const MAX_LABEL = 40
+
+/** What a new item is made from: a preset, or a custom piece with its own name and size. */
+export type ItemSpec = { kind: Kind; width: number; height: number; label?: string }
 
 export const GRID_CM = 10
 export const MIN_ROOM_CM = 100
@@ -55,7 +64,14 @@ export function parseItemSize(v: string): number | null {
 /** Stable, room-specific canvas id. Separate rooms never share furniture. */
 export const canvasIdFor = (roomId: string) => `room:${roomId}`
 
-export const isKind = (v: unknown): v is Kind => typeof v === 'string' && v in PRESET_BY_KIND
+export const isKind = (v: unknown): v is Kind => v === 'custom' || (typeof v === 'string' && v in PRESET_BY_KIND)
+
+/** Custom furniture name: trimmed, single-spaced, capped at MAX_LABEL; '' when blank. */
+export const cleanLabel = (v: unknown) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, MAX_LABEL).trim() : '')
+
+/** Display name: a custom item's own label (fallback "Custom"), else the preset's. */
+export const labelFor = (kind: Kind, label?: unknown) =>
+  kind === 'custom' ? cleanLabel(label) || 'Custom' : PRESET_BY_KIND[kind].label
 
 export const normRot = (v: unknown): Rot => {
   const n = ((Math.round(Number(v) / 90) * 90) % 360 + 360) % 360

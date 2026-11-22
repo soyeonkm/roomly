@@ -4,12 +4,12 @@ import { getUserColor, useAuthProfileReady, useMutations, usePresenceRoom, useQu
 import {
   AlertTriangle, ArrowLeft, Grid3x3, Link2, Maximize, Minus, Plus, Redo2, RotateCcw, RotateCw, Trash2, Undo2, WifiOff,
 } from 'lucide-react'
-import { Button, Input, Label, useToast } from '@/components/ui'
+import { Button, Input, Label, Popover, PopoverContent, PopoverTrigger, useToast } from '@/components/ui'
 import { cn } from '@/lib/utils'
 import { FurnitureArt, FurnitureIcon } from '@/components/room/FurnitureArt'
 import {
-  bounds, findIssues, footprintSize, formatM, nextRot, normRot, parseItemSize, parseRoomDims, placeCenter, PRESET_BY_KIND, PRESETS,
-  GRID_CM, MAX_ROOM_CM, MIN_ITEM_CM, type Item, type Kind, type Rot,
+  bounds, CUSTOM_DEFAULT, findIssues, footprintSize, formatM, MAX_LABEL, nextRot, normRot, parseItemSize, parseRoomDims, placeCenter, PRESETS,
+  GRID_CM, MAX_ROOM_CM, MIN_ITEM_CM, cleanLabel, type Item, type ItemSpec, type Rot,
 } from '@/lib/room-geometry'
 import { useRoomCanvas } from '@/lib/use-room-canvas'
 import type { Room } from '@/schemas/rooms-schema'
@@ -93,11 +93,10 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
 
   // --- actions ------------------------------------------------------------
   const addItem = useCallback(
-    (kind: Kind) => {
+    (spec: ItemSpec) => {
       if (!editable) return
-      const p = PRESET_BY_KIND[kind]
-      const c = placeCenter({ ...p, rot: 0 }, W / 2, L / 2, dims, snapOn)
-      setSelected(add(kind, c.x, c.y))
+      const c = placeCenter({ ...spec, rot: 0 }, W / 2, L / 2, dims, snapOn)
+      setSelected(add(spec, c.x, c.y))
     },
     [editable, add, W, L, dims, snapOn],
   )
@@ -202,7 +201,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
                 key={p.kind}
                 data-testid={`add-${p.kind}`}
                 disabled={!editable}
-                onClick={() => addItem(p.kind)}
+                onClick={() => addItem(p)}
                 title={`Add ${p.label} (${p.hint})`}
                 className="group flex w-20 shrink-0 flex-col items-center gap-1 rounded-xl border border-border bg-card p-2 text-xs text-foreground transition hover:border-primary/60 hover:shadow-[0_6px_20px_-6px_rgba(70,55,35,0.18)] disabled:cursor-not-allowed disabled:opacity-50 lg:w-auto"
               >
@@ -210,6 +209,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
                 <span className="font-medium">{p.label}</span>
               </button>
             ))}
+            <CustomFurnitureButton disabled={!editable} onAdd={addItem} />
           </div>
           <p className="hidden px-4 pb-4 text-[11px] leading-relaxed text-muted-foreground lg:block">
             Click to add at the room's center, then drag into place. <kbd>R</kbd> rotates, arrows nudge, <kbd>Del</kbd> removes.
@@ -411,11 +411,11 @@ function RoomSurface(props: {
                 )}
                 <text
                   x={it.x} y={it.y} textAnchor="middle" dominantBaseline="central"
-                  fontSize={Math.min(fontCm, fw / 4, fh / 2.2)}
+                  fontSize={Math.min(fontCm, fw / Math.max(4, it.label.length * 0.62), fh / 2.2)}
                   className="pointer-events-none fill-[var(--color-foreground)] font-medium"
                   style={{ paintOrder: 'stroke', stroke: 'rgba(255,253,249,0.85)', strokeWidth: fontCm / 4 }}
                 >
-                  {PRESET_BY_KIND[it.kind].label}
+                  {it.label}
                 </text>
               </g>
             )
@@ -472,7 +472,6 @@ function ItemPanel({ item, issues, items, editable, onRotate, onResize, onDelete
   onRotate: (dir: 1 | -1) => void; onResize: (width: number, height: number) => void
   onDelete: () => void; onSelect: (id: string) => void
 }) {
-  const p = PRESET_BY_KIND[item.kind]
   const { w, h } = footprintSize(item)
   const b = bounds(item)
   const issue = issues.get(item.id)
@@ -481,8 +480,8 @@ function ItemPanel({ item, issues, items, editable, onRotate, onResize, onDelete
       <div className="flex items-center gap-3">
         <div className="size-14 rounded-xl border border-border bg-card p-1.5"><FurnitureIcon kind={item.kind} w={item.width} h={item.height} /></div>
         <div>
-          <h2 className="font-display text-xl text-foreground">{p.label}</h2>
-          <p className="text-xs text-muted-foreground">{w} × {h} cm</p>
+          <h2 className="break-words font-display text-xl text-foreground" data-testid="item-label">{item.label}</h2>
+          <p className="text-xs text-muted-foreground" data-testid="item-footprint">{w} × {h} cm</p>
         </div>
       </div>
       <dl className="grid grid-cols-3 gap-2 text-sm">
@@ -497,9 +496,69 @@ function ItemPanel({ item, issues, items, editable, onRotate, onResize, onDelete
       </div>
       <Warnings issue={issue} items={items} onSelect={onSelect} />
       <Button variant="ghost" className="w-full text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={!editable} onClick={onDelete} data-testid="delete-item">
-        <Trash2 /> Remove {p.label.toLowerCase()}
+        <Trash2 /> Remove {nameIn(item)}
       </Button>
     </div>
+  )
+}
+
+/** Item name mid-sentence: presets lowercased ("Remove bed"), custom names as typed. */
+const nameIn = (i: Item) => (i.kind === 'custom' ? i.label : i.label.toLowerCase())
+
+/** Palette tile that opens a small form: name + size (default 120 × 60), then adds it at the room's center. */
+function CustomFurnitureButton({ disabled, onAdd }: { disabled: boolean; onAdd: (spec: ItemSpec) => void }) {
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState('')
+  const [w, setW] = useState(String(CUSTOM_DEFAULT.width))
+  const [h, setH] = useState(String(CUSTOM_DEFAULT.height))
+  const label = cleanLabel(name)
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!label) return
+    onAdd({
+      kind: 'custom', label,
+      width: parseItemSize(w) ?? CUSTOM_DEFAULT.width,
+      height: parseItemSize(h) ?? CUSTOM_DEFAULT.height,
+    })
+    setOpen(false)
+    setName('')
+    setW(String(CUSTOM_DEFAULT.width))
+    setH(String(CUSTOM_DEFAULT.height))
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        data-testid="add-custom"
+        disabled={disabled}
+        title="Add custom furniture"
+        className="group flex w-20 shrink-0 flex-col items-center gap-1 rounded-xl border border-dashed border-border bg-card p-2 text-xs text-foreground transition hover:border-primary/60 disabled:cursor-not-allowed disabled:opacity-50 lg:w-auto"
+      >
+        <span className="flex h-12 w-full items-center justify-center text-muted-foreground"><Plus className="size-6" /></span>
+        <span className="font-medium">Custom</span>
+      </PopoverTrigger>
+      <PopoverContent side="right" className="w-64 p-4">
+        {/* noValidate: min/step are spinner hints; parseItemSize clamps instead of the browser blocking e.g. 85 cm. */}
+        <form onSubmit={submit} noValidate className="space-y-3" data-testid="custom-form">
+          <div className="space-y-1.5">
+            <Label htmlFor="cf-name">Name</Label>
+            <Input id="cf-name" autoFocus required maxLength={MAX_LABEL} placeholder="e.g. Bookshelf" value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="cf-w">Width (cm)</Label>
+              <Input id="cf-w" type="number" inputMode="numeric" min={MIN_ITEM_CM} max={MAX_ROOM_CM} step={GRID_CM} value={w} onChange={(e) => setW(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="cf-d">Depth (cm)</Label>
+              <Input id="cf-d" type="number" inputMode="numeric" min={MIN_ITEM_CM} max={MAX_ROOM_CM} step={GRID_CM} value={h} onChange={(e) => setH(e.target.value)} />
+            </div>
+          </div>
+          <Button type="submit" className="w-full" disabled={!label}>Add to room</Button>
+        </form>
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -547,7 +606,7 @@ function Warnings({ issue, items, onSelect }: { issue?: { outOfBounds: boolean; 
           <AlertTriangle className="mt-0.5 size-4 shrink-0" /> Overlaps
           {issue.overlapsWith.map((id, i) => {
             const o = items.find((x) => x.id === id)
-            return o ? <button key={id} className="underline underline-offset-2" onClick={() => onSelect(id)}>{PRESET_BY_KIND[o.kind].label.toLowerCase()}{i < issue.overlapsWith.length - 1 ? ',' : ''}</button> : null
+            return o ? <button key={id} className="underline underline-offset-2" onClick={() => onSelect(id)}>{nameIn(o)}{i < issue.overlapsWith.length - 1 ? ',' : ''}</button> : null
           })}
         </p>
       )}
@@ -628,7 +687,7 @@ function RoomPanel({ roomId, room, editable, issues, items, onSelect }: {
                 <li key={i.id}>
                   <button onClick={() => onSelect(i.id)} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm text-[#7a3a22] hover:bg-[#f8e9e1]">
                     <AlertTriangle className="size-4 shrink-0" />
-                    <span>{PRESET_BY_KIND[i.kind].label}: {[iss.outOfBounds && 'past the walls', iss.overlapsWith.length > 0 && 'overlapping'].filter(Boolean).join(', ')}</span>
+                    <span>{i.label}: {[iss.outOfBounds && 'past the walls', iss.overlapsWith.length > 0 && 'overlapping'].filter(Boolean).join(', ')}</span>
                   </button>
                 </li>
               )

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useCanvas, type CanvasShapeClient } from 'deepspace'
-import { canvasIdFor, isKind, normRot, PRESET_BY_KIND, type Item, type Kind, type Rot } from './room-geometry'
+import { canvasIdFor, cleanLabel, isKind, labelFor, normRot, type Item, type ItemSpec, type Rot } from './room-geometry'
 
 /**
  * useCanvas, adapted to Roomly's furniture model.
@@ -32,7 +32,7 @@ function toItem(s: CanvasShapeClient, p?: Pending[string]): Item | null {
       if (server[k] === p.base[k]) (live as Record<string, number>)[k] = p.fields[k]!
     }
   }
-  return { id: s.id, kind, ...live }
+  return { id: s.id, kind, label: labelFor(kind, s.props?.label), ...live }
 }
 
 export function useRoomCanvas(roomId: string) {
@@ -93,11 +93,11 @@ export function useRoomCanvas(roomId: string) {
   )
 
   const add = useCallback(
-    (kind: Kind, x: number, y: number): string => {
-      const p = PRESET_BY_KIND[kind]
+    ({ kind, width, height, label }: ItemSpec, x: number, y: number): string => {
       // CanvasRoom honours a client-supplied id, so the caller can select it right away.
       const id = crypto.randomUUID()
-      addShape({ id, type: 'furniture', x, y, width: p.width, height: p.height, props: { kind, rot: 0 } })
+      const props = kind === 'custom' ? { kind, rot: 0, label: cleanLabel(label) } : { kind, rot: 0 }
+      addShape({ id, type: 'furniture', x, y, width, height, props })
       return id
     },
     [addShape],

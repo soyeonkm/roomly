@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { canvasIdFor, findIssues, footprintSize, nextRot, normRot, parseItemSize, parseRoomDims, placeCenter, type Item } from './room-geometry'
+import { bounds, canvasIdFor, cleanLabel, CUSTOM_DEFAULT, isKind, labelFor, findIssues, footprintSize, nextRot, normRot, parseItemSize, parseRoomDims, placeCenter, type Item } from './room-geometry'
 
 const room = { widthCm: 400, lengthCm: 300 }
-const item = (o: Partial<Item>): Item => ({ id: 'a', kind: 'desk', x: 100, y: 100, width: 120, height: 60, rot: 0, ...o })
+const item = (o: Partial<Item>): Item => ({ id: 'a', kind: 'desk', label: 'Desk', x: 100, y: 100, width: 120, height: 60, rot: 0, ...o })
 
 describe('room geometry', () => {
   it('rotation swaps the footprint and cycles 0→90→180→270→0', () => {
@@ -19,6 +19,26 @@ describe('room geometry', () => {
     expect(parseItemSize('99999')).toBe(3000)
     expect(parseItemSize('')).toBeNull()
     expect(parseItemSize('abc')).toBeNull()
+  })
+
+  it('resizing keeps the center and pulls an item back inside the walls', () => {
+    // Desk against the right wall (right edge at 400) grows from 120 to 200 wide.
+    expect(placeCenter({ width: 200, height: 60, rot: 0 }, 340, 100, room, false)).toEqual({ x: 300, y: 100 })
+    // Rotated, width runs along y: a 260-long item near the bottom wall is pulled up.
+    expect(placeCenter({ width: 260, height: 60, rot: 90 }, 100, 250, room, false)).toEqual({ x: 100, y: 170 })
+    // Room-sized item ends exactly at the walls; a size that already fits doesn't move.
+    expect(placeCenter({ width: 400, height: 300, rot: 0 }, 50, 50, room, false)).toEqual({ x: 200, y: 150 })
+    expect(placeCenter({ width: 120, height: 60, rot: 0 }, 200, 150, room, false)).toEqual({ x: 200, y: 150 })
+  })
+
+  it('custom sizes drive footprint, bounds and overlap checks', () => {
+    const big = item({ id: 'big', width: 300, height: 40, rot: 90, x: 200, y: 150 })
+    expect(footprintSize(big)).toEqual({ w: 40, h: 300 })
+    expect(bounds(big)).toEqual({ left: 180, top: 0, right: 220, bottom: 300 })
+    const other = item({ id: 'o', width: 50, height: 50, x: 250, y: 150 })
+    expect(findIssues([big, other], room).has('o')).toBe(false) // 220 < 225: clear
+    const wider = { ...big, width: 300, height: 120 } // footprint now 120 wide: 140…260
+    expect(findIssues([wider, other], room).get('o')?.overlapsWith).toEqual(['big'])
   })
 
   it('snaps footprint edges to the grid and clamps inside the room', () => {
@@ -48,6 +68,18 @@ describe('room geometry', () => {
     expect(parseRoomDims('3.5', '4')).toEqual({ widthCm: 350, lengthCm: 400 })
     expect(typeof parseRoomDims('0.5', '4')).toBe('string')
     expect(typeof parseRoomDims('abc', '4')).toBe('string')
+  })
+
+  it('custom furniture: valid kind, cleaned label, 120 × 60 default', () => {
+    expect(isKind('custom')).toBe(true)
+    expect(isKind('piano')).toBe(false)
+    expect(CUSTOM_DEFAULT).toEqual({ width: 120, height: 60 })
+    expect(cleanLabel('  Book   shelf \n')).toBe('Book shelf')
+    expect(cleanLabel('x'.repeat(60))).toHaveLength(40)
+    expect(cleanLabel(42)).toBe('')
+    expect(labelFor('custom', 'Piano')).toBe('Piano')
+    expect(labelFor('custom', '   ')).toBe('Custom') // blank or tampered props still render
+    expect(labelFor('bed', 'ignored')).toBe('Bed')
   })
 
   it('gives every room its own canvas', () => {
