@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useCanvas, type CanvasShapeClient } from 'deepspace'
-import { canvasIdFor, cleanLabel, isKind, isOpening, labelFor, normRot, type Item, type ItemSpec, type Rot } from './room-geometry'
+import { canvasIdFor, cleanLabel, isKind, isOpening, labelFor, MAX_ROOM_CM, MIN_ITEM_CM, normRot, type Item, type ItemSpec, type Rot } from './room-geometry'
 
 /**
  * useCanvas, adapted to Roomly's furniture model.
@@ -17,9 +17,12 @@ import { canvasIdFor, cleanLabel, isKind, isOpening, labelFor, normRot, type Ite
 type Fields = { x?: number; y?: number; rot?: Rot; width?: number; height?: number; label?: string; along?: number; flip?: boolean }
 type Pending = Record<string, { fields: Fields; base: Required<Fields> }>
 
+// Shapes come straight from any member's socket (CanvasRoom doesn't validate them), so coerce every field.
+const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+const size = (v: unknown) => Math.min(Math.max(num(v), MIN_ITEM_CM), MAX_ROOM_CM)
 const serverFields = (s: CanvasShapeClient): Required<Fields> => ({
-  x: s.x, y: s.y, rot: normRot(s.props?.rot), width: s.width, height: s.height, label: cleanLabel(s.props?.label),
-  along: Number(s.props?.along) || 0, flip: s.props?.flip === true,
+  x: num(s.x), y: num(s.y), rot: normRot(s.props?.rot), width: size(s.width), height: size(s.height), label: cleanLabel(s.props?.label),
+  along: num(s.props?.along), flip: s.props?.flip === true,
 })
 
 function toItem(s: CanvasShapeClient, p?: Pending[string]): Item | null {

@@ -19,8 +19,10 @@ export const roomsSchema: CollectionSchema = {
     { name: 'collaborators', storage: 'text', interpretation: { kind: 'json' } },
   ],
   permissions: {
-    viewer: { read: true, create: false, update: false, delete: false },
-    member: { read: true, create: true, update: true, delete: 'own' },
+    // Signed-out sockets get the `viewer` role, so viewers read nothing.
+    viewer: { read: false, create: false, update: false, delete: false },
+    // Legacy `collaborators` is read-only: members can't plant entries in someone else's room.
+    member: { read: true, create: true, update: true, delete: 'own', writableFields: ['name', 'widthCm', 'lengthCm'] },
     admin: { read: true, create: true, update: true, delete: true },
   },
 }

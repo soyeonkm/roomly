@@ -73,6 +73,8 @@ describe('room geometry', () => {
   it('custom furniture: valid kind, cleaned label, 120 × 60 default', () => {
     expect(isKind('custom')).toBe(true)
     expect(isKind('piano')).toBe(false)
+    // Shapes arrive unvalidated from other members; inherited names must not count as kinds.
+    for (const k of ['__proto__', 'toString', 'constructor', 'hasOwnProperty']) expect(isKind(k)).toBe(false)
     expect(CUSTOM_DEFAULT).toEqual({ width: 120, height: 60 })
     expect(cleanLabel('  Book   shelf \n')).toBe('Book shelf')
     expect(cleanLabel('x'.repeat(60))).toHaveLength(40)

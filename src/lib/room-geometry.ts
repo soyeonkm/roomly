@@ -79,7 +79,7 @@ export function parseItemSize(v: string): number | null {
 /** Stable, room-specific canvas id. Separate rooms never share furniture. */
 export const canvasIdFor = (roomId: string) => `room:${roomId}`
 
-export const isKind = (v: unknown): v is Kind => v === 'custom' || (typeof v === 'string' && v in PRESET_BY_KIND)
+export const isKind = (v: unknown): v is Kind => v === 'custom' || (typeof v === 'string' && Object.hasOwn(PRESET_BY_KIND, v)) // not `in`: '__proto__' would match
 
 /** Custom furniture name: trimmed, single-spaced, capped at MAX_LABEL; '' when blank. */
 export const cleanLabel = (v: unknown) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, MAX_LABEL).trim() : '')

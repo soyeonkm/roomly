@@ -17,7 +17,7 @@ export const roomVisitsSchema: CollectionSchema = {
     { name: 'roomId', storage: 'text', interpretation: 'plain', required: true, immutable: true, maxLength: 64 },
   ],
   permissions: {
-    viewer: { read: true, create: false, update: false, delete: false },
+    viewer: { read: false, create: false, update: false, delete: false }, // signed-out sockets are `viewer`
     member: { read: true, create: true, update: 'own', delete: 'own' },
     admin: { read: true, create: true, update: true, delete: true },
   },

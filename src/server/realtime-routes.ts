@@ -8,6 +8,7 @@
  */
 
 import type { Context, Hono } from 'hono'
+import { createMiddleware } from 'hono/factory'
 import { authenticatedRoomRequest, resolveAppRole, verifyJwt } from 'deepspace/worker'
 import type { JwtVerifierConfig, VerifyResult } from 'deepspace/worker'
 import type { AppContext, Env } from '../../worker.js'
@@ -142,8 +143,14 @@ export function registerRealtimeRoutes(app: Hono<AppContext>): void {
     return stub.fetch(roomRequest)
   })
 
+  // Room furniture and cursors are for signed-in users only (the pages are behind AuthGate).
+  const signedIn = createMiddleware<AppContext>(async (c, next) =>
+    new URL(c.req.url).searchParams.get('token') ? next() : c.text('Unauthorized', 401),
+  )
+
   app.get(
     '/ws/canvas/:docId',
+    signedIn,
     wsRoute(
       (env) => env.CANVAS_ROOMS,
       async (auth, env) => ({ role: await resolveAppRole(env, auth.userId) }),
@@ -152,6 +159,7 @@ export function registerRealtimeRoutes(app: Hono<AppContext>): void {
 
   app.get(
     '/ws/presence/:scopeId',
+    signedIn,
     wsRoute((env) => env.PRESENCE_ROOMS),
   )
 
