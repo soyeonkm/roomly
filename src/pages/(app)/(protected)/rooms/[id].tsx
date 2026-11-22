@@ -8,8 +8,8 @@ import { Button, Input, Label, useToast } from '@/components/ui'
 import { cn } from '@/lib/utils'
 import { FurnitureArt, FurnitureIcon } from '@/components/room/FurnitureArt'
 import {
-  bounds, findIssues, footprintSize, formatM, nextRot, normRot, parseRoomDims, placeCenter, PRESET_BY_KIND, PRESETS,
-  type Item, type Kind, type Rot,
+  bounds, findIssues, footprintSize, formatM, nextRot, normRot, parseItemSize, parseRoomDims, placeCenter, PRESET_BY_KIND, PRESETS,
+  GRID_CM, MAX_ROOM_CM, MIN_ITEM_CM, type Item, type Kind, type Rot,
 } from '@/lib/room-geometry'
 import { useRoomCanvas } from '@/lib/use-room-canvas'
 import type { Room } from '@/schemas/rooms-schema'
@@ -42,7 +42,7 @@ export default function RoomEditorPage() {
 function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; createdBy: string }) {
   const toast = useToast()
   const { userId } = useAuthProfileReady()
-  const { items, connected, canWrite, add, move, rotate, remove, undo, redo } = useRoomCanvas(roomId)
+  const { items, connected, canWrite, add, move, rotate, resize, remove, undo, redo } = useRoomCanvas(roomId)
   const { peers, updateState, connected: presenceConnected } = usePresenceRoom(`room:${roomId}`)
   const roomMut = useMutations<Room>('rooms')
   const editable = connected && canWrite
@@ -108,6 +108,16 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
       rotate(sel.id, nextRot(sel.rot, dir))
     },
     [editable, sel, rotate],
+  )
+
+  const resizeSel = useCallback(
+    (width: number, height: number) => {
+      if (!editable || !sel || (width === sel.width && height === sel.height)) return
+      // Keep the center, then pull it back inside the walls if the new size pokes out.
+      const c = placeCenter({ width, height, rot: sel.rot }, sel.x, sel.y, dims, false)
+      resize(sel.id, width, height, c.x, c.y)
+    },
+    [editable, sel, dims, resize],
   )
 
   const deleteSel = useCallback(() => {
@@ -235,7 +245,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
         {/* Properties */}
         <aside aria-label="Properties" className="overflow-y-auto border-t border-border bg-card/50 p-4 lg:border-l lg:border-t-0">
           {sel ? (
-            <ItemPanel item={sel} issues={issues} items={liveItems} editable={editable} onRotate={rotateSel} onDelete={deleteSel} onSelect={setSelected} />
+            <ItemPanel item={sel} issues={issues} items={liveItems} editable={editable} onRotate={rotateSel} onResize={resizeSel} onDelete={deleteSel} onSelect={setSelected} />
           ) : (
             <RoomPanel roomId={roomId} room={room} editable={roomMut.ready} issues={issues} items={liveItems} onSelect={setSelected} />
           )}
@@ -382,6 +392,8 @@ function RoomSurface(props: {
                 data-x={it.x}
                 data-y={it.y}
                 data-rot={it.rot}
+                data-width={it.width}
+                data-height={it.height}
                 data-selected={isSel || undefined}
                 data-warning={issue ? 'true' : undefined}
                 onPointerDown={(e) => onItemDown(e, it)}
@@ -455,9 +467,10 @@ function DimLabel({ x1, y1, x2, y2, label, fontCm, vertical }: { x1: number; y1:
   )
 }
 
-function ItemPanel({ item, issues, items, editable, onRotate, onDelete, onSelect }: {
+function ItemPanel({ item, issues, items, editable, onRotate, onResize, onDelete, onSelect }: {
   item: Item; issues: ReturnType<typeof findIssues>; items: Item[]; editable: boolean
-  onRotate: (dir: 1 | -1) => void; onDelete: () => void; onSelect: (id: string) => void
+  onRotate: (dir: 1 | -1) => void; onResize: (width: number, height: number) => void
+  onDelete: () => void; onSelect: (id: string) => void
 }) {
   const p = PRESET_BY_KIND[item.kind]
   const { w, h } = footprintSize(item)
@@ -477,6 +490,7 @@ function ItemPanel({ item, issues, items, editable, onRotate, onDelete, onSelect
         <Stat label="From top" value={`${Math.round(b.top)} cm`} />
         <Stat label="Rotation" value={`${item.rot}°`} testId="item-rotation" />
       </dl>
+      <SizeFields item={item} editable={editable} onResize={onResize} />
       <div className="grid grid-cols-2 gap-2">
         <Button variant="outline" disabled={!editable} onClick={() => onRotate(-1)} aria-label="Rotate left"><RotateCcw /> 90°</Button>
         <Button variant="outline" disabled={!editable} onClick={() => onRotate(1)} aria-label="Rotate right" data-testid="rotate-right"><RotateCw /> 90°</Button>
@@ -485,6 +499,40 @@ function ItemPanel({ item, issues, items, editable, onRotate, onDelete, onSelect
       <Button variant="ghost" className="w-full text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={!editable} onClick={onDelete} data-testid="delete-item">
         <Trash2 /> Remove {p.label.toLowerCase()}
       </Button>
+    </div>
+  )
+}
+
+/** Unrotated width × depth in cm. Commits on blur / Enter so typing doesn't spam the undo stack. */
+function SizeFields({ item, editable, onResize }: { item: Item; editable: boolean; onResize: (width: number, height: number) => void }) {
+  const [w, setW] = useState(String(item.width))
+  const [h, setH] = useState(String(item.height))
+  // Follow remote edits, undo/redo and selecting another item.
+  useEffect(() => { setW(String(item.width)); setH(String(item.height)) }, [item.id, item.width, item.height])
+
+  function commit() {
+    const nw = parseItemSize(w) ?? item.width
+    const nh = parseItemSize(h) ?? item.height
+    setW(String(nw))
+    setH(String(nh))
+    onResize(nw, nh)
+  }
+  const field = (id: string, label: string, value: string, set: (v: string) => void) => (
+    <div className="space-y-1.5">
+      <Label htmlFor={id}>{label}</Label>
+      <Input
+        id={id} data-testid={id} type="number" inputMode="numeric" min={MIN_ITEM_CM} max={MAX_ROOM_CM} step={GRID_CM}
+        value={value} disabled={!editable}
+        onChange={(e) => set(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }}
+      />
+    </div>
+  )
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      {field('item-width', 'Width (cm)', w, setW)}
+      {field('item-depth', 'Depth (cm)', h, setH)}
     </div>
   )
 }

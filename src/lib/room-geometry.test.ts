@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canvasIdFor, findIssues, footprintSize, nextRot, normRot, parseRoomDims, placeCenter, type Item } from './room-geometry'
+import { canvasIdFor, findIssues, footprintSize, nextRot, normRot, parseItemSize, parseRoomDims, placeCenter, type Item } from './room-geometry'
 
 const room = { widthCm: 400, lengthCm: 300 }
 const item = (o: Partial<Item>): Item => ({ id: 'a', kind: 'desk', x: 100, y: 100, width: 120, height: 60, rot: 0, ...o })
@@ -11,6 +11,14 @@ describe('room geometry', () => {
     expect(nextRot(0, -1)).toBe(270)
     expect(normRot('junk')).toBe(0)
     expect(normRot(450)).toBe(90)
+  })
+
+  it('parses furniture size input: rounds, clamps to 10 cm … 30 m, rejects junk', () => {
+    expect(parseItemSize('142.6')).toBe(143)
+    expect(parseItemSize('3')).toBe(10)
+    expect(parseItemSize('99999')).toBe(3000)
+    expect(parseItemSize('')).toBeNull()
+    expect(parseItemSize('abc')).toBeNull()
   })
 
   it('snaps footprint edges to the grid and clamps inside the room', () => {

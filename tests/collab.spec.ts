@@ -173,6 +173,15 @@ test('two users edit the same room layout in real time', async ({ users }) => {
     await expect(aBed).toHaveAttribute('data-rot', '90')
     await expect(bBed).toHaveAttribute('data-rot', '90', { timeout: 10_000 })
 
+    // A resizes it from the panel -> both see the new size.
+    await a.page.getByTestId('item-width').fill('140')
+    await a.page.getByTestId('item-depth').fill('190')
+    await a.page.getByTestId('item-depth').press('Enter')
+    await expect(aBed).toHaveAttribute('data-width', '140')
+    await expect(aBed).toHaveAttribute('data-height', '190')
+    await expect(bBed).toHaveAttribute('data-width', '140', { timeout: 10_000 })
+    await expect(bBed).toHaveAttribute('data-height', '190', { timeout: 10_000 })
+
     // B adds a desk (auto-selected) -> A sees it; B deletes it -> A sees it gone.
     const aDesk = a.page.locator('[data-testid="furniture"][data-kind="desk"]')
     await b.page.getByTestId('add-desk').click()

@@ -6,7 +6,7 @@ import { canvasIdFor, isKind, normRot, PRESET_BY_KIND, type Item, type Kind, typ
  * useCanvas, adapted to Roomly's furniture model.
  *
  * The SDK's CanvasRoom broadcasts `add`/`delete`/undo/redo to everyone, but
- * `move` and `update` only to OTHER peers. So the local peer keeps an
+ * `move`, `resize` and `update` only to OTHER peers. So the local peer keeps an
  * optimistic overlay of its own un-echoed writes. Each overlay field
  * remembers the server value it was written over (`base`); as soon as the
  * server's value for that field differs from `base` (a peer edited it, or a
@@ -14,10 +14,12 @@ import { canvasIdFor, isKind, normRot, PRESET_BY_KIND, type Item, type Kind, typ
  * room stays the only source of truth.
  */
 
-type Fields = { x?: number; y?: number; rot?: Rot }
+type Fields = { x?: number; y?: number; rot?: Rot; width?: number; height?: number }
 type Pending = Record<string, { fields: Fields; base: Required<Fields> }>
 
-const serverFields = (s: CanvasShapeClient): Required<Fields> => ({ x: s.x, y: s.y, rot: normRot(s.props?.rot) })
+const serverFields = (s: CanvasShapeClient): Required<Fields> => ({
+  x: s.x, y: s.y, rot: normRot(s.props?.rot), width: s.width, height: s.height,
+})
 
 function toItem(s: CanvasShapeClient, p?: Pending[string]): Item | null {
   const kind = s.props?.kind
@@ -30,12 +32,12 @@ function toItem(s: CanvasShapeClient, p?: Pending[string]): Item | null {
       if (server[k] === p.base[k]) (live as Record<string, number>)[k] = p.fields[k]!
     }
   }
-  return { id: s.id, kind, width: s.width, height: s.height, ...live }
+  return { id: s.id, kind, ...live }
 }
 
 export function useRoomCanvas(roomId: string) {
   const canvas = useCanvas(canvasIdFor(roomId))
-  const { shapes, moveShape, updateShape, addShape, deleteShape, undo, redo } = canvas
+  const { shapes, moveShape, resizeShape, updateShape, addShape, deleteShape, undo, redo } = canvas
   const [pending, setPending] = useState<Pending>({})
   const awaitingSnapshot = useRef(false)
   const prevShapes = useRef(shapes)
@@ -118,6 +120,15 @@ export function useRoomCanvas(roomId: string) {
     [remember, updateShape],
   )
 
+  /** New unrotated size; x/y is the new center (callers clamp it back inside the room). */
+  const resize = useCallback(
+    (id: string, width: number, height: number, x: number, y: number) => {
+      remember(id, { width, height, x, y })
+      resizeShape(id, width, height, x, y)
+    },
+    [remember, resizeShape],
+  )
+
   const undoOne = useCallback(() => { awaitingSnapshot.current = true; undo() }, [undo])
   const redoOne = useCallback(() => { awaitingSnapshot.current = true; redo() }, [redo])
 
@@ -128,6 +139,7 @@ export function useRoomCanvas(roomId: string) {
     add,
     move,
     rotate,
+    resize,
     remove: deleteShape,
     undo: undoOne,
     redo: redoOne,

@@ -43,6 +43,14 @@ export const PRESET_BY_KIND = Object.fromEntries(PRESETS.map((p) => [p.kind, p])
 export const GRID_CM = 10
 export const MIN_ROOM_CM = 100
 export const MAX_ROOM_CM = 3000
+export const MIN_ITEM_CM = 10
+
+/** Furniture size from panel input (cm): rounded, 10 cm … 30 m, or null when not a number. */
+export function parseItemSize(v: string): number | null {
+  const n = Math.round(Number(v))
+  if (!v.trim() || !Number.isFinite(n)) return null
+  return Math.min(Math.max(n, MIN_ITEM_CM), MAX_ROOM_CM)
+}
 
 /** Stable, room-specific canvas id. Separate rooms never share furniture. */
 export const canvasIdFor = (roomId: string) => `room:${roomId}`
