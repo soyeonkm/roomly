@@ -743,3 +743,40 @@ test('view-only users (canWrite=false) see live edits but cannot change anything
     await deleteRooms(a.page, [name])
   }
 })
+
+test('export: downloads the floor plan as a JPEG, without selection or cursors', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [a] = await users(1)
+  const page = a.page
+  const name = testName('Export room')
+  try {
+    await createRoom(page, name) // 4 m × 3.5 m
+    await waitEditable(page)
+    await page.getByTestId('add-bed').click()
+    await expect(page.locator('[data-testid="furniture"][data-kind="bed"]')).toHaveCount(1)
+
+    const [download] = await Promise.all([page.waitForEvent('download'), page.getByTestId('export-button').click()])
+    expect(download.suggestedFilename()).toMatch(/export-room-floor-plan\.jpg$/)
+    const bytes = await (await import('node:fs/promises')).readFile((await download.path())!)
+    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xff, 0xd8, 0xff]) // JPEG magic
+
+    // Decode it in the page: 2 px per cm of (room + 70 cm margin each side), and the walls are actually drawn.
+    const info = await page.evaluate(async (b64) => {
+      const img = new Image()
+      img.src = `data:image/jpeg;base64,${b64}`
+      await img.decode()
+      const c = document.createElement('canvas')
+      c.width = img.width
+      c.height = img.height
+      const ctx = c.getContext('2d')!
+      ctx.drawImage(img, 0, 0)
+      const px = (x: number, y: number) => Array.from(ctx.getImageData(x, y, 1, 1).data.slice(0, 3))
+      return { w: img.width, h: img.height, corner: px(5, 5), wall: px((70 - 3) * 2, 500) }
+    }, bytes.toString('base64'))
+    expect(info).toMatchObject({ w: 1080, h: 980 })
+    const diff = info.corner.reduce((s, v, i) => s + Math.abs(v - info.wall[i]), 0)
+    expect(diff).toBeGreaterThan(200) // dark wall vs light background: theme colors survived the export
+  } finally {
+    await deleteRooms(page, [name])
+  }
+})

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import { Link, useParams } from 'react-router-dom'
 import { getUserColor, useAuthProfileReady, useMutations, usePresenceRoom, useQuery } from 'deepspace'
 import {
-  AlertTriangle, ArrowLeft, FlipHorizontal2, Grid3x3, Link2, Maximize, Minus, Plus, Redo2, RotateCcw, RotateCw, Trash2, Undo2, WifiOff,
+  AlertTriangle, ArrowLeft, Download, FlipHorizontal2, Grid3x3, Link2, Maximize, Minus, Plus, Redo2, RotateCcw, RotateCw, Trash2, Undo2, WifiOff,
 } from 'lucide-react'
 import { Button, Input, Label, Popover, PopoverContent, PopoverTrigger, useToast } from '@/components/ui'
 import { cn } from '@/lib/utils'
@@ -13,6 +13,7 @@ import {
   type Item, type ItemSpec, type Rot,
 } from '@/lib/room-geometry'
 import { useRoomCanvas } from '@/lib/use-room-canvas'
+import { svgToJpeg } from '@/lib/export-image'
 import type { Room } from '@/schemas/rooms-schema'
 import { visitIdFor, type RoomVisit } from '@/schemas/room-visits-schema'
 
@@ -200,6 +201,23 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
     }
   }
 
+  // --- export -------------------------------------------------------------
+  const [exporting, setExporting] = useState(false)
+  async function exportJpeg() {
+    const svg = document.querySelector<SVGSVGElement>('svg[aria-label="Room floor plan"]')
+    if (!svg) return
+    setExporting(true)
+    try {
+      const background = getComputedStyle(svg.closest('[data-testid="room-surface"]')!).backgroundColor
+      const slug = room.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'room'
+      await svgToJpeg(svg, `${slug}-floor-plan.jpg`, { background })
+    } catch (e) {
+      toast.error('Could not export', e instanceof Error ? e.message : String(e))
+    } finally {
+      setExporting(false)
+    }
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background" data-testid="room-editor" data-can-write={String(editable)}>
       {/* Top bar */}
@@ -217,6 +235,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
           <Button size="icon" variant="ghost" aria-label="Undo" title="Undo (⌘Z)" disabled={!editable} onClick={undo}><Undo2 /></Button>
           <Button size="icon" variant="ghost" aria-label="Redo" title="Redo (⇧⌘Z)" disabled={!editable} onClick={redo}><Redo2 /></Button>
         </div>
+        <Button size="sm" variant="ghost" onClick={exportJpeg} loading={exporting} data-testid="export-button" title="Download the floor plan as a JPEG"><Download /> Export</Button>
         <Button size="sm" variant="outline" onClick={copyLink} data-testid="share-button"><Link2 /> Share</Button>
       </div>
 
@@ -468,12 +487,12 @@ function RoomSurface(props: {
                 <g transform={`translate(${it.x} ${it.y}) rotate(${it.rot}) translate(${-it.width / 2} ${-it.height / 2})`}>
                   <FurnitureArt kind={it.kind} w={it.width} h={it.height} flip={it.flip} />
                 </g>
-                {issue && <rect x={b.left} y={b.top} width={fw} height={fh} fill="url(#warn)" stroke="#b25434" strokeWidth={1.5} strokeDasharray="5 3" vectorEffect="non-scaling-stroke" rx={3} />}
+                {issue && <rect data-export="skip" x={b.left} y={b.top} width={fw} height={fh} fill="url(#warn)" stroke="#b25434" strokeWidth={1.5} strokeDasharray="5 3" vectorEffect="non-scaling-stroke" rx={3} />}
                 {peerSel && !isSel && (
-                  <rect x={b.left - 3} y={b.top - 3} width={fw + 6} height={fh + 6} rx={5} fill="none" stroke={getUserColor(peerSel.userId)} strokeWidth={2} vectorEffect="non-scaling-stroke" />
+                  <rect data-export="skip" x={b.left - 3} y={b.top - 3} width={fw + 6} height={fh + 6} rx={5} fill="none" stroke={getUserColor(peerSel.userId)} strokeWidth={2} vectorEffect="non-scaling-stroke" />
                 )}
                 {isSel && (
-                  <rect x={b.left - 4} y={b.top - 4} width={fw + 8} height={fh + 8} rx={6} fill="none" stroke="var(--color-accent-strong)" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />
+                  <rect data-export="skip" x={b.left - 4} y={b.top - 4} width={fw + 8} height={fh + 8} rx={6} fill="none" stroke="var(--color-accent-strong)" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />
                 )}
                 {!isOpening(it.kind) && <text
                   x={it.x} y={it.y} textAnchor="middle" dominantBaseline="central"
@@ -494,7 +513,7 @@ function RoomSurface(props: {
             const color = getUserColor(p.userId)
             const s = 1 / pxPerCm
             return (
-              <g key={p.userId} transform={`translate(${c.x} ${c.y}) scale(${s})`} className="pointer-events-none" data-testid="peer-cursor">
+              <g key={p.userId} transform={`translate(${c.x} ${c.y}) scale(${s})`} className="pointer-events-none" data-testid="peer-cursor" data-export="skip">
                 <path d="M0 0 L0 16 L4.5 12 L8 19 L10.5 18 L7 11 L13 11 Z" fill={color} stroke="#fff" strokeWidth={1.2} />
                 <g transform="translate(14 14)">
                   <rect height={18} width={p.userName.length * 6.5 + 12} rx={9} fill={color} />

@@ -14,6 +14,7 @@ Plan a shared room with your roommate in real time. Sketch the floor plan, drop 
 - **Live collaboration.** Edits sync instantly. You can see other people's cursors and what they have selected.
 - **Undo/redo** for your own changes.
 - **Sharing.** Send the room link. Anyone signed in who opens it can edit, and it shows up under "Shared with you" on their dashboard.
+- **Export.** Download the floor plan as a JPEG. Selection outlines and other people's cursors are left out.
 
 ### Keyboard
 
