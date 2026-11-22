@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useCanvas, type CanvasShapeClient } from 'deepspace'
-import { canvasIdFor, cleanLabel, isKind, labelFor, normRot, type Item, type ItemSpec, type Rot } from './room-geometry'
+import { canvasIdFor, cleanLabel, isKind, isOpening, labelFor, normRot, type Item, type ItemSpec, type Rot } from './room-geometry'
 
 /**
  * useCanvas, adapted to Roomly's furniture model.
@@ -14,11 +14,12 @@ import { canvasIdFor, cleanLabel, isKind, labelFor, normRot, type Item, type Ite
  * room stays the only source of truth.
  */
 
-type Fields = { x?: number; y?: number; rot?: Rot; width?: number; height?: number; label?: string }
+type Fields = { x?: number; y?: number; rot?: Rot; width?: number; height?: number; label?: string; along?: number; flip?: boolean }
 type Pending = Record<string, { fields: Fields; base: Required<Fields> }>
 
 const serverFields = (s: CanvasShapeClient): Required<Fields> => ({
   x: s.x, y: s.y, rot: normRot(s.props?.rot), width: s.width, height: s.height, label: cleanLabel(s.props?.label),
+  along: Number(s.props?.along) || 0, flip: s.props?.flip === true,
 })
 
 function toItem(s: CanvasShapeClient, p?: Pending[string]): Item | null {
@@ -76,8 +77,9 @@ export function useRoomCanvas(roomId: string) {
 
   const items = useMemo(() => {
     const list = shapes.map((s) => toItem(s, pending[s.id])).filter((i): i is Item => i !== null)
-    // Rugs under everything, then creation order.
-    return list.sort((a, b) => Number(b.kind === 'rug') - Number(a.kind === 'rug'))
+    // Rugs, doors and windows under furniture (so furniture in a door's swing stays clickable), then creation order.
+    const under = (i: Item) => Number(i.kind === 'rug' || isOpening(i.kind))
+    return list.sort((a, b) => under(b) - under(a))
   }, [shapes, pending])
 
   const remember = useCallback(
@@ -93,10 +95,10 @@ export function useRoomCanvas(roomId: string) {
   )
 
   const add = useCallback(
-    ({ kind, width, height, label }: ItemSpec, x: number, y: number): string => {
+    ({ kind, width, height, label }: ItemSpec, x: number, y: number, wall?: { rot: Rot; along: number }): string => {
       // CanvasRoom honours a client-supplied id, so the caller can select it right away.
       const id = crypto.randomUUID()
-      const props = kind === 'custom' ? { kind, rot: 0, label: cleanLabel(label) } : { kind, rot: 0 }
+      const props = kind === 'custom' ? { kind, rot: 0, label: cleanLabel(label) } : { kind, rot: 0, ...wall }
       addShape({ id, type: 'furniture', x, y, width, height, props })
       return id
     },
@@ -138,6 +140,23 @@ export function useRoomCanvas(roomId: string) {
     [remember, updateShape],
   )
 
+  /** Openings: wall + position along it in ONE update, so a cross-wall move is one undo step. */
+  const place = useCallback(
+    (id: string, rot: Rot, along: number) => {
+      remember(id, { rot, along })
+      updateShape(id, { rot, along })
+    },
+    [remember, updateShape],
+  )
+
+  const setFlip = useCallback(
+    (id: string, flip: boolean) => {
+      remember(id, { flip })
+      updateShape(id, { flip })
+    },
+    [remember, updateShape],
+  )
+
   const undoOne = useCallback(() => { awaitingSnapshot.current = true; undo() }, [undo])
   const redoOne = useCallback(() => { awaitingSnapshot.current = true; redo() }, [redo])
 
@@ -150,6 +169,8 @@ export function useRoomCanvas(roomId: string) {
     rotate,
     resize,
     rename,
+    place,
+    setFlip,
     remove: deleteShape,
     undo: undoOne,
     redo: redoOne,

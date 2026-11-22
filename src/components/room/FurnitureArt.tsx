@@ -3,9 +3,10 @@ import type { Kind } from '@/lib/room-geometry'
 /**
  * Top-down illustration of a furniture item, drawn in its own unrotated
  * local space (0..w, 0..h, cm). The caller rotates it. "Top" of the local
- * space is the item's back (headboard, sofa back, chair back).
+ * space is the item's back (headboard, sofa back, chair back) — for doors and
+ * windows, the wall. They draw over the wall band (y -6…0) to cut it open.
  */
-export function FurnitureArt({ kind, w, h }: { kind: Kind; w: number; h: number }) {
+export function FurnitureArt({ kind, w, h, flip }: { kind: Kind; w: number; h: number; flip?: boolean }) {
   const s = { vectorEffect: 'non-scaling-stroke' as const }
   switch (kind) {
     case 'bed': {
@@ -74,6 +75,25 @@ export function FurnitureArt({ kind, w, h }: { kind: Kind; w: number; h: number 
           <rect width={w} height={h} rx={4} fill="#ead7c6" stroke="#c47a5a" strokeWidth={1} {...s} />
           <rect x={10} y={10} width={w - 20} height={h - 20} rx={3} fill="none" stroke="#c47a5a" strokeDasharray="6 5" strokeWidth={1} {...s} />
           <rect x={w * 0.3} y={h * 0.3} width={w * 0.4} height={h * 0.4} rx={h * 0.2} fill="#dfc0a8" />
+        </g>
+      )
+    case 'door':
+      // Hinge at (0,0); leaf drawn open along the left edge; dashed arc = swing.
+      return (
+        <g transform={flip ? `translate(${w} 0) scale(-1 1)` : undefined}>
+          <rect x={0} y={-7} width={w} height={8} fill="var(--color-floor)" />
+          <path d={`M0 0 L${w} 0 A${w} ${w} 0 0 1 0 ${h} Z`} fill="rgba(140,162,136,0.12)" />
+          <path d={`M${w} 0 A${w} ${w} 0 0 1 0 ${h}`} fill="none" stroke="#8a8073" strokeDasharray="5 4" strokeWidth={1} {...s} />
+          <line x1={0} y1={0} x2={0} y2={h} stroke="#5d4735" strokeWidth={2.5} {...s} />
+        </g>
+      )
+    case 'window':
+      return (
+        <g>
+          <rect width={w} height={h} fill="transparent" />
+          <rect x={0} y={-7} width={w} height={8} fill="#d7e8f0" stroke="#7aa7c0" strokeWidth={1} {...s} />
+          <line x1={0} x2={w} y1={-3} y2={-3} stroke="#7aa7c0" strokeWidth={1} {...s} />
+          <rect x={4} y={1} width={w - 8} height={Math.max(2, h * 0.3)} rx={1} fill="#efe6d8" />
         </g>
       )
     case 'custom':

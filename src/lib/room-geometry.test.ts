@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bounds, canvasIdFor, cleanLabel, CUSTOM_DEFAULT, isKind, labelFor, findIssues, footprintSize, nextRot, normRot, parseItemSize, parseRoomDims, placeCenter, type Item } from './room-geometry'
+import { bounds, canvasIdFor, clampAlong, openingCenter, openingDepth, snapToWall, cleanLabel, CUSTOM_DEFAULT, isKind, labelFor, findIssues, footprintSize, nextRot, normRot, parseItemSize, parseRoomDims, placeCenter, type Item } from './room-geometry'
 
 const room = { widthCm: 400, lengthCm: 300 }
 const item = (o: Partial<Item>): Item => ({ id: 'a', kind: 'desk', label: 'Desk', x: 100, y: 100, width: 120, height: 60, rot: 0, ...o })
@@ -80,6 +80,37 @@ describe('room geometry', () => {
     expect(labelFor('custom', 'Piano')).toBe('Piano')
     expect(labelFor('custom', '   ')).toBe('Custom') // blank or tampered props still render
     expect(labelFor('bed', 'ignored')).toBe('Bed')
+  })
+
+  it('openings sit on their wall: center derived from wall + along, clamped to the wall', () => {
+    const door = { width: 80, height: 80, along: 100 }
+    expect(openingCenter({ ...door, rot: 0 }, room)).toEqual({ x: 100, y: 40 })
+    expect(openingCenter({ ...door, rot: 90 }, room)).toEqual({ x: 360, y: 100 })
+    expect(openingCenter({ ...door, rot: 180 }, room)).toEqual({ x: 100, y: 260 })
+    expect(openingCenter({ ...door, rot: 270 }, room)).toEqual({ x: 40, y: 100 })
+    // Past the end of the wall (e.g. the room shrank): pulled back so it fits.
+    expect(openingCenter({ ...door, rot: 90, along: 999 }, room)).toEqual({ x: 360, y: 260 })
+    expect(clampAlong({ width: 500, rot: 0 }, 10, room)).toBe(200) // wider than the wall: centered
+    // A door's footprint is its swing; windows are a fixed shallow strip.
+    expect(openingDepth('door', 90)).toBe(90)
+    expect(openingDepth('window', 200)).toBe(15)
+  })
+
+  it('dragging an opening snaps it to the nearest wall', () => {
+    expect(snapToWall({ width: 80 }, 200, 20, room, false)).toEqual({ rot: 0, along: 200 })
+    expect(snapToWall({ width: 80 }, 390, 150, room, false)).toEqual({ rot: 90, along: 150 })
+    expect(snapToWall({ width: 80 }, 123, 290, room, true)).toEqual({ rot: 180, along: 120 }) // edge 80 → grid
+    expect(snapToWall({ width: 80 }, 5, 10, room, false)).toEqual({ rot: 270, along: 40 }) // corner: clamped onto wall
+  })
+
+  it('a door blocks furniture in its swing; windows never overlap', () => {
+    const door = item({ id: 'door', kind: 'door', x: 100, y: 40, width: 80, height: 80 })
+    const win = item({ id: 'win', kind: 'window', x: 100, y: 7.5, width: 100, height: 15 })
+    const chair = item({ id: 'chair', kind: 'chair', x: 100, y: 30, width: 50, height: 50 })
+    const issues = findIssues([door, win, chair], room)
+    expect(issues.get('chair')?.overlapsWith).toEqual(['door'])
+    expect(issues.get('door')?.overlapsWith).toEqual(['chair'])
+    expect(issues.has('win')).toBe(false)
   })
 
   it('gives every room its own canvas', () => {

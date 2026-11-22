@@ -2,21 +2,23 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import { Link, useParams } from 'react-router-dom'
 import { getUserColor, useAuthProfileReady, useMutations, usePresenceRoom, useQuery } from 'deepspace'
 import {
-  AlertTriangle, ArrowLeft, Grid3x3, Link2, Maximize, Minus, Plus, Redo2, RotateCcw, RotateCw, Trash2, Undo2, WifiOff,
+  AlertTriangle, ArrowLeft, FlipHorizontal2, Grid3x3, Link2, Maximize, Minus, Plus, Redo2, RotateCcw, RotateCw, Trash2, Undo2, WifiOff,
 } from 'lucide-react'
 import { Button, Input, Label, Popover, PopoverContent, PopoverTrigger, useToast } from '@/components/ui'
 import { cn } from '@/lib/utils'
 import { FurnitureArt, FurnitureIcon } from '@/components/room/FurnitureArt'
 import {
   bounds, CUSTOM_DEFAULT, findIssues, footprintSize, formatM, MAX_LABEL, nextRot, normRot, parseItemSize, parseRoomDims, placeCenter, PRESETS,
-  GRID_CM, MAX_ROOM_CM, MIN_ITEM_CM, cleanLabel, type Item, type ItemSpec, type Rot,
+  GRID_CM, MAX_ROOM_CM, MIN_ITEM_CM, cleanLabel, clampAlong, isOpening, openingCenter, openingDepth, snapToWall,
+  type Item, type ItemSpec, type Rot,
 } from '@/lib/room-geometry'
 import { useRoomCanvas } from '@/lib/use-room-canvas'
 import type { Room } from '@/schemas/rooms-schema'
 import { visitIdFor, type RoomVisit } from '@/schemas/room-visits-schema'
 
 type Pt = { x: number; y: number }
-type DragState = { id: string; x: number; y: number; rot: Rot }
+/** `along` set = an opening being dragged along the walls. */
+type DragState = { id: string; x: number; y: number; rot: Rot; along?: number }
 type PeerState = { cursor?: Pt | null; drag?: DragState | null; selected?: string | null }
 
 const PAD = 70 // cm of margin around the room inside the SVG
@@ -43,7 +45,7 @@ export default function RoomEditorPage() {
 function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; createdBy: string }) {
   const toast = useToast()
   const { userId } = useAuthProfileReady()
-  const { items, connected, canWrite, add, move, rotate, resize, rename, remove, undo, redo } = useRoomCanvas(roomId)
+  const { items, connected, canWrite, add, move, rotate, resize, rename, place, setFlip, remove, undo, redo } = useRoomCanvas(roomId)
   const { peers, updateState, connected: presenceConnected } = usePresenceRoom(`room:${roomId}`)
   const roomMut = useMutations<Room>('rooms')
   const visitMut = useMutations<RoomVisit>('roomVisits')
@@ -83,9 +85,11 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
     return items.map((it) => {
       if (drag?.id === it.id) return { ...it, x: drag.x, y: drag.y, rot: drag.rot }
       const pd = peerDrags.get(it.id)
-      return pd ? { ...it, x: pd.x, y: pd.y, rot: normRot(pd.rot) } : it
+      if (pd) return { ...it, x: pd.x, y: pd.y, rot: normRot(pd.rot) }
+      // Openings sit on their wall wherever the room's walls are now.
+      return isOpening(it.kind) ? { ...it, ...openingCenter(it, dims) } : it
     })
-  }, [items, drag, uniquePeers])
+  }, [items, drag, uniquePeers, dims])
 
   const issues = useMemo(() => findIssues(liveItems, dims), [liveItems, dims])
   const sel = liveItems.find((i) => i.id === selected) ?? null
@@ -96,6 +100,11 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
   const addItem = useCallback(
     (spec: ItemSpec) => {
       if (!editable) return
+      if (isOpening(spec.kind)) {
+        const wall = { rot: 0 as Rot, along: clampAlong({ ...spec, rot: 0 }, W / 2, dims) } // top wall, centered
+        const c = openingCenter({ ...spec, ...wall }, dims)
+        return setSelected(add(spec, c.x, c.y, wall))
+      }
       const c = placeCenter({ ...spec, rot: 0 }, W / 2, L / 2, dims, snapOn)
       setSelected(add(spec, c.x, c.y))
     },
@@ -104,7 +113,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
 
   const rotateSel = useCallback(
     (dir: 1 | -1) => {
-      if (!editable || !sel) return
+      if (!editable || !sel || isOpening(sel.kind)) return // an opening's wall is its rotation
       rotate(sel.id, nextRot(sel.rot, dir))
     },
     [editable, sel, rotate],
@@ -114,7 +123,9 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
   const resizeItem = useCallback(
     (id: string, width: number, height: number) => {
       const it = liveItems.find((i) => i.id === id)
+      if (it && isOpening(it.kind)) height = openingDepth(it.kind, width)
       if (!editable || !it || (width === it.width && height === it.height)) return
+      if (isOpening(it.kind)) return resize(id, width, height, it.x, it.y) // x/y derived from the wall
       // Keep the center, then pull it back inside the walls if the new size pokes out.
       const c = placeCenter({ width, height, rot: it.rot }, it.x, it.y, dims, false)
       resize(id, width, height, c.x, c.y)
@@ -132,6 +143,10 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
     [editable, liveItems, rename],
   )
 
+  const flipSel = useCallback(() => {
+    if (editable && sel?.kind === 'door') setFlip(sel.id, !sel.flip)
+  }, [editable, sel, setFlip])
+
   const deleteSel = useCallback(() => {
     if (!editable || !sel) return
     remove(sel.id)
@@ -141,10 +156,17 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
   const nudge = useCallback(
     (dx: number, dy: number) => {
       if (!editable || !sel) return
+      if (isOpening(sel.kind)) {
+        // Slide along the wall: left/right on top/bottom walls, up/down on side walls.
+        const cur = clampAlong(sel, sel.along ?? 0, dims)
+        const along = clampAlong(sel, cur + (sel.rot % 180 === 0 ? dx : dy), dims)
+        if (along !== cur) place(sel.id, sel.rot, along)
+        return
+      }
       const c = placeCenter(sel, sel.x + dx, sel.y + dy, dims, false)
       if (c.x !== sel.x || c.y !== sel.y) move(sel.id, c.x, c.y)
     },
-    [editable, sel, dims, move],
+    [editable, sel, dims, move, place],
   )
 
   // --- keyboard -----------------------------------------------------------
@@ -209,7 +231,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
         <aside aria-label="Furniture" className="border-b border-border bg-card/50 lg:border-b-0 lg:border-r">
           <p className="hidden px-4 pt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground lg:block">Furniture</p>
           <div className="flex gap-2 overflow-x-auto p-3 lg:grid lg:grid-cols-2 lg:overflow-visible">
-            {PRESETS.map((p) => (
+            {PRESETS.filter((p) => !isOpening(p.kind)).map((p) => (
               <button
                 key={p.kind}
                 data-testid={`add-${p.kind}`}
@@ -223,6 +245,22 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
               </button>
             ))}
             <CustomFurnitureButton disabled={!editable} onAdd={addItem} />
+          </div>
+          <p className="hidden px-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground lg:block">Doors &amp; windows</p>
+          <div className="flex gap-2 overflow-x-auto p-3 lg:grid lg:grid-cols-2 lg:overflow-visible">
+            {PRESETS.filter((p) => isOpening(p.kind)).map((p) => (
+              <button
+                key={p.kind}
+                data-testid={`add-${p.kind}`}
+                disabled={!editable}
+                onClick={() => addItem(p)}
+                title={`Add ${p.label} (${p.hint}) — drag it along the walls`}
+                className="group flex w-20 shrink-0 flex-col items-center gap-1 rounded-xl border border-border bg-card p-2 text-xs text-foreground transition hover:border-primary/60 disabled:cursor-not-allowed disabled:opacity-50 lg:w-auto"
+              >
+                <span className="flex h-12 w-full items-center justify-center"><span className="h-full w-12"><FurnitureIcon kind={p.kind} w={p.width} h={p.height} /></span></span>
+                <span className="font-medium">{p.label}</span>
+              </button>
+            ))}
           </div>
           <p className="hidden px-4 pb-4 text-[11px] leading-relaxed text-muted-foreground lg:block">
             Click to add at the room's center, then drag into place. <kbd>R</kbd> rotates, arrows nudge, <kbd>Del</kbd> removes.
@@ -238,7 +276,10 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
           onDrop={(d, moved) => {
             setDrag(null)
             updateState({ drag: null })
-            if (moved) move(d.id, d.x, d.y)
+            if (moved) {
+              if (d.along !== undefined) place(d.id, d.rot, d.along)
+              else move(d.id, d.x, d.y)
+            }
           }}
           onCursor={(c) => updateState({ cursor: c })}
           toolbar={
@@ -258,7 +299,7 @@ function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; creat
         {/* Properties */}
         <aside aria-label="Properties" className="overflow-y-auto border-t border-border bg-card/50 p-4 lg:border-l lg:border-t-0">
           {sel ? (
-            <ItemPanel item={sel} issues={issues} items={liveItems} editable={editable} onRotate={rotateSel} onResize={resizeItem} onRename={renameItem} onDelete={deleteSel} onSelect={setSelected} />
+            <ItemPanel item={sel} issues={issues} items={liveItems} editable={editable} onRotate={rotateSel} onFlip={flipSel} onResize={resizeItem} onRename={renameItem} onDelete={deleteSel} onSelect={setSelected} />
           ) : (
             <RoomPanel roomId={roomId} room={room} editable={roomMut.ready} issues={issues} items={liveItems} onSelect={setSelected} />
           )}
@@ -335,6 +376,16 @@ function RoomSurface(props: {
     sendCursor({ x: Math.round(p.x), y: Math.round(p.y) })
     const d = dragRef.current
     if (!d) return
+    if (isOpening(d.item.kind)) {
+      // Follow the pointer to the nearest wall; the item turns to face it.
+      const w = snapToWall(d.item, p.x, p.y, dims, snapOn)
+      const c = openingCenter({ ...d.item, ...w }, dims)
+      if (c.x === d.last.x && c.y === d.last.y && w.rot === d.last.rot) return
+      d.moved = w.rot !== d.item.rot || w.along !== clampAlong(d.item, d.item.along ?? 0, dims)
+      d.last = { id: d.item.id, x: c.x, y: c.y, rot: w.rot, along: w.along }
+      onDrag(d.last)
+      return
+    }
     const c = placeCenter(d.item, p.x - d.dx, p.y - d.dy, dims, snapOn)
     if (c.x === d.last.x && c.y === d.last.y) return
     d.moved = c.x !== d.item.x || c.y !== d.item.y
@@ -407,13 +458,15 @@ function RoomSurface(props: {
                 data-rot={it.rot}
                 data-width={it.width}
                 data-height={it.height}
+                data-flip={it.flip || undefined}
+                data-along={isOpening(it.kind) ? it.along : undefined}
                 data-selected={isSel || undefined}
                 data-warning={issue ? 'true' : undefined}
                 onPointerDown={(e) => onItemDown(e, it)}
                 style={{ cursor: editable ? 'grab' : 'pointer', touchAction: 'none' }}
               >
                 <g transform={`translate(${it.x} ${it.y}) rotate(${it.rot}) translate(${-it.width / 2} ${-it.height / 2})`}>
-                  <FurnitureArt kind={it.kind} w={it.width} h={it.height} />
+                  <FurnitureArt kind={it.kind} w={it.width} h={it.height} flip={it.flip} />
                 </g>
                 {issue && <rect x={b.left} y={b.top} width={fw} height={fh} fill="url(#warn)" stroke="#b25434" strokeWidth={1.5} strokeDasharray="5 3" vectorEffect="non-scaling-stroke" rx={3} />}
                 {peerSel && !isSel && (
@@ -422,14 +475,14 @@ function RoomSurface(props: {
                 {isSel && (
                   <rect x={b.left - 4} y={b.top - 4} width={fw + 8} height={fh + 8} rx={6} fill="none" stroke="var(--color-accent-strong)" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />
                 )}
-                <text
+                {!isOpening(it.kind) && <text
                   x={it.x} y={it.y} textAnchor="middle" dominantBaseline="central"
                   fontSize={Math.min(fontCm, fw / Math.max(4, it.label.length * 0.62), fh / 2.2)}
                   className="pointer-events-none fill-[var(--color-foreground)] font-medium"
                   style={{ paintOrder: 'stroke', stroke: 'rgba(255,253,249,0.85)', strokeWidth: fontCm / 4 }}
                 >
                   {it.label}
-                </text>
+                </text>}
               </g>
             )
           })}
@@ -480,9 +533,9 @@ function DimLabel({ x1, y1, x2, y2, label, fontCm, vertical }: { x1: number; y1:
   )
 }
 
-function ItemPanel({ item, issues, items, editable, onRotate, onResize, onRename, onDelete, onSelect }: {
+function ItemPanel({ item, issues, items, editable, onRotate, onFlip, onResize, onRename, onDelete, onSelect }: {
   item: Item; issues: ReturnType<typeof findIssues>; items: Item[]; editable: boolean
-  onRotate: (dir: 1 | -1) => void; onResize: (id: string, width: number, height: number) => void
+  onRotate: (dir: 1 | -1) => void; onFlip: () => void; onResize: (id: string, width: number, height: number) => void
   onRename: (id: string, name: string) => void
   onDelete: () => void; onSelect: (id: string) => void
 }) {
@@ -501,14 +554,21 @@ function ItemPanel({ item, issues, items, editable, onRotate, onResize, onRename
       <dl className="grid grid-cols-3 gap-2 text-sm">
         <Stat label="From left" value={`${Math.round(b.left)} cm`} />
         <Stat label="From top" value={`${Math.round(b.top)} cm`} />
-        <Stat label="Rotation" value={`${item.rot}°`} testId="item-rotation" />
+        {isOpening(item.kind)
+          ? <Stat label="Wall" value={WALL_NAMES[item.rot]} testId="item-wall" />
+          : <Stat label="Rotation" value={`${item.rot}°`} testId="item-rotation" />}
       </dl>
       {item.kind === 'custom' && <NameField key={item.id} item={item} editable={editable} onRename={onRename} />}
-      <SizeFields key={item.id} item={item} editable={editable} onResize={onResize} />
-      <div className="grid grid-cols-2 gap-2">
-        <Button variant="outline" disabled={!editable} onClick={() => onRotate(-1)} aria-label="Rotate left"><RotateCcw /> 90°</Button>
-        <Button variant="outline" disabled={!editable} onClick={() => onRotate(1)} aria-label="Rotate right" data-testid="rotate-right"><RotateCw /> 90°</Button>
-      </div>
+      <SizeFields key={item.id} item={item} editable={editable} onResize={onResize} widthOnly={isOpening(item.kind)} />
+      {item.kind === 'door' ? (
+        <Button variant="outline" className="w-full" disabled={!editable} onClick={onFlip} data-testid="flip-door"><FlipHorizontal2 /> Flip swing</Button>
+      ) : !isOpening(item.kind) && (
+        <div className="grid grid-cols-2 gap-2">
+          <Button variant="outline" disabled={!editable} onClick={() => onRotate(-1)} aria-label="Rotate left"><RotateCcw /> 90°</Button>
+          <Button variant="outline" disabled={!editable} onClick={() => onRotate(1)} aria-label="Rotate right" data-testid="rotate-right"><RotateCw /> 90°</Button>
+        </div>
+      )}
+      {isOpening(item.kind) && <p className="text-xs text-muted-foreground">Drag along the walls to move it; arrow keys slide it.</p>}
       <Warnings issue={issue} items={items} onSelect={onSelect} />
       <Button variant="ghost" className="w-full text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={!editable} onClick={onDelete} data-testid="delete-item">
         <Trash2 /> Remove {nameIn(item)}
@@ -516,6 +576,8 @@ function ItemPanel({ item, issues, items, editable, onRotate, onResize, onRename
     </div>
   )
 }
+
+const WALL_NAMES: Record<Rot, string> = { 0: 'Top', 90: 'Right', 180: 'Bottom', 270: 'Left' }
 
 /** Item name mid-sentence: presets lowercased ("Remove bed"), custom names as typed. */
 const nameIn = (i: Item) => (i.kind === 'custom' ? i.label : i.label.toLowerCase())
@@ -607,7 +669,11 @@ function NameField({ item, editable, onRename }: { item: Item; editable: boolean
  * and on unmount: clicking another item or the floor swaps the panel before the input's blur fires.
  * Keyed by item id, so switching items is an unmount.
  */
-function SizeFields({ item, editable, onResize }: { item: Item; editable: boolean; onResize: (id: string, width: number, height: number) => void }) {
+function SizeFields({ item, editable, onResize, widthOnly }: {
+  item: Item; editable: boolean; onResize: (id: string, width: number, height: number) => void
+  /** Openings: depth follows width (door swing) or is fixed (window). */
+  widthOnly?: boolean
+}) {
   const [w, setW] = useState(String(item.width))
   const [h, setH] = useState(String(item.height))
   // Follow remote edits and undo/redo.
@@ -636,7 +702,7 @@ function SizeFields({ item, editable, onResize }: { item: Item; editable: boolea
   return (
     <div className="grid grid-cols-2 gap-2">
       {field('item-width', 'Width (cm)', w, setW)}
-      {field('item-depth', 'Depth (cm)', h, setH)}
+      {!widthOnly && field('item-depth', 'Depth (cm)', h, setH)}
     </div>
   )
 }
@@ -732,7 +798,10 @@ function RoomPanel({ roomId, room, editable, issues, items, onSelect }: {
                 <li key={i.id}>
                   <button onClick={() => onSelect(i.id)} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm text-[#7a3a22] hover:bg-[#f8e9e1]">
                     <AlertTriangle className="size-4 shrink-0" />
-                    <span>{i.label}: {[iss.outOfBounds && 'past the walls', iss.overlapsWith.length > 0 && 'overlapping'].filter(Boolean).join(', ')}</span>
+                    <span>{i.label}: {[
+                      iss.outOfBounds && 'past the walls',
+                      iss.overlapsWith.length > 0 && (i.kind !== 'door' && iss.overlapsWith.some((id) => items.find((o) => o.id === id)?.kind === 'door') ? 'blocks a door' : 'overlapping'),
+                    ].filter(Boolean).join(', ')}</span>
                   </button>
                 </li>
               )

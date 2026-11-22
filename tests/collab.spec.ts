@@ -575,6 +575,101 @@ test('custom furniture form: validation, cancel, names in warnings, undo', async
   }
 })
 
+test('doors and windows: sit on walls, drag between walls in one undo step, flag blocked swings', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [a] = await users(1)
+  const page = a.page
+  const name = testName('Doors room')
+  const floor = page.getByRole('application', { name: 'Room floor plan' })
+  const door = page.locator('[data-testid="furniture"][data-kind="door"]')
+  const win = page.locator('[data-testid="furniture"][data-kind="window"]')
+  const W = 400 // createRoom default: 4 m × 3.5 m
+  /** Press at an item, release at room coordinates (cm). */
+  async function dragTo(el: typeof door, x: number, y: number) {
+    const box = (await floor.boundingBox())!
+    const px = box.width / (W + 140) // viewBox has 70 cm of padding each side
+    const from = (await el.boundingBox())!
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height * 0.25)
+    await page.mouse.down()
+    await page.mouse.move(box.x + (x + 70) * px, box.y + (y + 70) * px, { steps: 8 })
+    await page.mouse.up()
+  }
+  try {
+    await createRoom(page, name)
+    await waitEditable(page)
+
+    // A new door goes on the top wall, centered; its depth is its swing.
+    await page.getByTestId('add-door').click()
+    await expect(door).toHaveAttribute('data-rot', '0')
+    await expect(door).toHaveAttribute('data-x', '200')
+    await expect(door).toHaveAttribute('data-y', '40')
+    await expect(page.getByTestId('item-wall')).toHaveText('Top')
+    await expect(page.getByTestId('item-depth')).toHaveCount(0)
+    await expect(page.getByTestId('rotate-right')).toHaveCount(0)
+
+    // Drag onto the left wall: it turns to face it and snaps to the grid.
+    await dragTo(door, 10, 180) // not 175: that's a snap boundary, sub-pixel rounding picks either side
+    await expect(door).toHaveAttribute('data-rot', '270')
+    await expect(door).toHaveAttribute('data-x', '40')
+    await expect(door).toHaveAttribute('data-y', '180')
+    await expect(page.getByTestId('item-wall')).toHaveText('Left')
+
+    // Changing walls is ONE undo step (wall + position move together).
+    await page.getByRole('button', { name: 'Undo' }).click()
+    await expect(door).toHaveAttribute('data-rot', '0', { timeout: 10_000 })
+    await expect(door).toHaveAttribute('data-x', '200')
+    await page.getByRole('button', { name: 'Redo' }).click()
+    await expect(door).toHaveAttribute('data-rot', '270', { timeout: 10_000 })
+    await expect(door).toHaveAttribute('data-y', '180')
+
+    // Flip the swing; widen it — the swing grows with it and it stays on the wall.
+    await page.getByTestId('flip-door').click()
+    await expect(door).toHaveAttribute('data-flip', 'true')
+    await page.getByTestId('item-width').fill('90')
+    await page.getByTestId('item-width').press('Enter')
+    await expect(door).toHaveAttribute('data-width', '90')
+    await expect(door).toHaveAttribute('data-height', '90')
+    await expect(door).toHaveAttribute('data-x', '45')
+
+    // Arrow keys slide it along its wall.
+    await page.keyboard.press('ArrowDown')
+    await expect(door).toHaveAttribute('data-y', '190')
+    await page.keyboard.press('ArrowUp')
+    await expect(door).toHaveAttribute('data-y', '180')
+
+    // A bed pushed into the swing is flagged as blocking the door.
+    await page.getByTestId('add-bed').click()
+    await expect(page.getByTestId('item-label')).toHaveText('Bed') // arrives from the server, then is selected
+    for (let i = 0; i < 3; i++) await page.keyboard.press('Shift+ArrowLeft')
+    await expect(page.locator('[data-testid="furniture"][data-kind="bed"]')).toHaveAttribute('data-x', '80')
+    await floor.click({ position: { x: 5, y: 5 } })
+    await expect(page.getByTestId('layout-warnings')).toContainText('Bed: blocks a door')
+
+    // Windows sit in the top wall and never count as overlapping.
+    await page.getByTestId('add-window').click()
+    await expect(win).toHaveAttribute('data-rot', '0')
+    await expect(win).toHaveAttribute('data-height', '15')
+    await floor.click({ position: { x: 5, y: 5 } })
+    await expect(page.getByTestId('layout-warnings')).not.toContainText('Window')
+
+    // Shrinking the room keeps the door on its wall: pulled up to fit the shorter wall.
+    await page.getByLabel('Length (m)').fill('2')
+    await page.getByRole('button', { name: 'Save room' }).click()
+    await expect(door).toHaveAttribute('data-y', '155', { timeout: 10_000 })
+    await expect(door).toHaveAttribute('data-x', '45')
+
+    // Reload: wall, swing side and size come back.
+    await page.reload()
+    await expect(door).toHaveCount(1, { timeout: 15_000 })
+    await expect(door).toHaveAttribute('data-rot', '270')
+    await expect(door).toHaveAttribute('data-flip', 'true')
+    await expect(door).toHaveAttribute('data-width', '90')
+    await expect(door).toHaveAttribute('data-y', '155')
+  } finally {
+    await deleteRooms(page, [name])
+  }
+})
+
 test('view-only users (canWrite=false) see live edits but cannot change anything', async ({ users }) => {
   test.setTimeout(120_000)
   const [a, b] = await users(2)
@@ -606,7 +701,7 @@ test('view-only users (canWrite=false) see live edits but cannot change anything
     await expect(b.page.getByTestId('room-editor')).toHaveAttribute('data-can-write', 'false')
 
     // Every edit control is disabled.
-    for (const kind of ['bed', 'sofa', 'desk', 'chair', 'dresser', 'rug', 'custom']) {
+    for (const kind of ['bed', 'sofa', 'desk', 'chair', 'dresser', 'rug', 'custom', 'door', 'window']) {
       await expect(b.page.getByTestId(`add-${kind}`)).toBeDisabled()
     }
     await expect(b.page.getByRole('button', { name: 'Undo' })).toBeDisabled()

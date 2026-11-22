@@ -10,13 +10,20 @@
  *   props.kind    — preset id or 'custom', props.rot — 0 | 90 | 180 | 270
  *   props.label   — custom items only: the user's name for it
  *
+ * Doors and windows ("openings") live on a wall instead: props.rot is the
+ * wall (0 top, 90 right, 180 bottom, 270 left — the item's back faces it) and
+ * props.along is the center's distance along that wall (from its left / top
+ * end). Their x/y is derived from the room (openingCenter), so they stay on
+ * the wall when the room is resized, and any move — even to another wall —
+ * is ONE canvas update, so one undo step. A door's footprint is its swing.
+ *
  * The screen never appears here: the editor renders an SVG whose viewBox is
  * in cm and converts pointer events with getScreenCTM(), so any screen size
  * or zoom maps to the same room coordinates.
  */
 
 export type Rot = 0 | 90 | 180 | 270
-export type PresetKind = 'bed' | 'desk' | 'sofa' | 'chair' | 'dresser' | 'rug'
+export type PresetKind = 'bed' | 'desk' | 'sofa' | 'chair' | 'dresser' | 'rug' | 'door' | 'window'
 export type Kind = PresetKind | 'custom'
 
 export type Item = {
@@ -28,7 +35,13 @@ export type Item = {
   width: number
   height: number
   rot: Rot
+  /** Openings only (see top). */
+  along?: number
+  /** Doors only: hinge on the other side. */
+  flip?: boolean
 }
+
+export const WINDOW_DEPTH = 15
 
 export type Preset = { kind: PresetKind; label: string; width: number; height: number; hint: string }
 
@@ -39,6 +52,8 @@ export const PRESETS: Preset[] = [
   { kind: 'chair', label: 'Chair', width: 50, height: 50, hint: '50 × 50' },
   { kind: 'dresser', label: 'Dresser', width: 100, height: 50, hint: '100 × 50' },
   { kind: 'rug', label: 'Rug', width: 200, height: 140, hint: '200 × 140' },
+  { kind: 'door', label: 'Door', width: 80, height: 80, hint: '80 wide · swing shown' },
+  { kind: 'window', label: 'Window', width: 100, height: WINDOW_DEPTH, hint: '100 wide' },
 ]
 
 export const PRESET_BY_KIND = Object.fromEntries(PRESETS.map((p) => [p.kind, p])) as Record<PresetKind, Preset>
@@ -92,6 +107,40 @@ export function bounds(i: Item) {
 
 export const snap = (v: number, step = GRID_CM) => Math.round(v / step) * step
 
+export const isOpening = (k: Kind) => k === 'door' || k === 'window'
+
+/** Openings' depth follows their width: a door's swing is as deep as the door is wide. */
+export const openingDepth = (k: Kind, width: number) => (k === 'door' ? width : WINDOW_DEPTH)
+
+const wallLength = (rot: Rot, room: { widthCm: number; lengthCm: number }) => (rot % 180 === 0 ? room.widthCm : room.lengthCm)
+
+/** Clamp an opening's `along` so it stays on its wall (centered if wider than the wall). */
+export function clampAlong(i: { width: number; rot: Rot }, along: number, room: { widthCm: number; lengthCm: number }) {
+  const len = wallLength(i.rot, room)
+  return i.width >= len ? len / 2 : Math.min(Math.max(along, i.width / 2), len - i.width / 2)
+}
+
+/** Room-space center of an opening sitting on its wall. */
+export function openingCenter(i: { width: number; height: number; rot: Rot; along?: number }, room: { widthCm: number; lengthCm: number }) {
+  const a = clampAlong(i, i.along ?? 0, room)
+  const d = i.height / 2
+  switch (i.rot) {
+    case 0: return { x: a, y: d }
+    case 90: return { x: room.widthCm - d, y: a }
+    case 180: return { x: a, y: room.lengthCm - d }
+    default: return { x: d, y: a }
+  }
+}
+
+/** Nearest wall to (x, y) and the position along it, edge snapped to the grid when `snapOn`. */
+export function snapToWall(i: { width: number }, x: number, y: number, room: { widthCm: number; lengthCm: number }, snapOn: boolean) {
+  const d: [Rot, number][] = [[0, y], [90, room.widthCm - x], [180, room.lengthCm - y], [270, x]]
+  const rot = d.reduce((best, cur) => (cur[1] < best[1] ? cur : best))[0]
+  let along = rot % 180 === 0 ? x : y
+  if (snapOn) along = snap(along - i.width / 2) + i.width / 2
+  return { rot, along: clampAlong({ width: i.width, rot }, along, room) }
+}
+
 /**
  * Where an item's center ends up when dropped at `x, y`: footprint's top-left
  * edge snapped to the grid (when `snapOn`), then clamped inside the room when
@@ -124,11 +173,14 @@ export function overlaps(a: Item, b: Item) {
   return A.left < B.right - EPS && B.left < A.right - EPS && A.top < B.bottom - EPS && B.top < A.bottom - EPS
 }
 
+const flat = (k: Kind) => k === 'rug' || k === 'window'
+
 export type Issue = { outOfBounds: boolean; overlapsWith: string[] }
 
 /**
- * Per-item warnings. Rugs sit under furniture, so they never count as
- * overlapping. ponytail: O(n²) pairwise scan — fine for a room's worth of
+ * Per-item warnings. Rugs sit under furniture and windows sit in the wall,
+ * so neither counts as overlapping. A door's footprint is its swing, so
+ * furniture in it overlaps the door. ponytail: O(n²) pairwise scan — fine for a room's worth of
  * furniture; use a sweep line if rooms ever hold hundreds of items.
  */
 export function findIssues(items: Item[], room: { widthCm: number; lengthCm: number }) {
@@ -136,10 +188,7 @@ export function findIssues(items: Item[], room: { widthCm: number; lengthCm: num
   for (const it of items) {
     const b = bounds(it)
     const outOfBounds = b.left < -0.01 || b.top < -0.01 || b.right > room.widthCm + 0.01 || b.bottom > room.lengthCm + 0.01
-    const overlapsWith =
-      it.kind === 'rug'
-        ? []
-        : items.filter((o) => o.id !== it.id && o.kind !== 'rug' && overlaps(it, o)).map((o) => o.id)
+    const overlapsWith = flat(it.kind) ? [] : items.filter((o) => o.id !== it.id && !flat(o.kind) && overlaps(it, o)).map((o) => o.id)
     if (outOfBounds || overlapsWith.length) issues.set(it.id, { outOfBounds, overlapsWith })
   }
   return issues
