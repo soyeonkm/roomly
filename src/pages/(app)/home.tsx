@@ -1,28 +1,22 @@
 /**
- * Placeholder home page — replace this with the app's real home.
- *
- * This is intentionally unstyled scaffolding, not a design to build on.
- * Design the app's own look (layout, theme tokens, typography) from your
- * product's point of view instead of extending this page.
+ * /home — signed-in users go straight to their rooms; signed-out visitors
+ * get a sign-in prompt inside the app chrome.
  */
-
-import { useAuthProfileReady } from 'deepspace'
-import { APP_NAME } from '../../constants'
+import { useState } from 'react'
+import { Navigate } from 'react-router-dom'
+import { AuthOverlay, useAuthStatus } from 'deepspace'
+import { Button } from '@/components/ui'
 
 export default function HomePage() {
-  const { isSignedIn, user } = useAuthProfileReady({ requireUser: true })
-
+  const { isSignedIn } = useAuthStatus()
+  const [open, setOpen] = useState(false)
+  if (isSignedIn) return <Navigate to="/rooms" replace />
   return (
-    <div className="flex min-h-full flex-col items-center justify-center gap-3 bg-background px-6 text-center text-foreground">
-      <h1 className="text-2xl font-semibold">{APP_NAME}</h1>
-      <p className="max-w-md text-sm text-muted-foreground">
-        This is a placeholder page. Replace <code>src/pages/(app)/home.tsx</code>{' '}
-        with the app&apos;s real home, and give the app its own theme in{' '}
-        <code>src/themes.css</code>.
-      </p>
-      {isSignedIn && user && (
-        <p className="text-sm text-muted-foreground">Signed in as {user.name ?? user.email}</p>
-      )}
+    <div className="flex min-h-full flex-col items-center justify-center gap-4 px-6 text-center">
+      <h1 className="font-display text-4xl text-foreground">Welcome to Roomly</h1>
+      <p className="max-w-md text-muted-foreground">Sign in to plan rooms and share them with your roommate.</p>
+      <Button onClick={() => setOpen(true)}>Sign in</Button>
+      {open && <AuthOverlay onClose={() => setOpen(false)} />}
     </div>
   )
 }

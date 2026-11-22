@@ -16,6 +16,7 @@
  * cleanup. No need to manage browser contexts manually.
  */
 import { test, expect, loadAllTestAccounts } from 'deepspace/testing'
+import { createRoom, deleteRooms, dragBy, testName, waitEditable } from './rooms.helpers'
 
 // A machine that has never created test accounts is the normal state of a
 // fresh checkout, and there `users()` throws — turning "you have no pool yet"
@@ -130,4 +131,121 @@ test('API status page shows local retry after first-load API failure', async ({ 
   await retryButton.click()
   await expect.poll(() => requestCount).toBeGreaterThan(requestsAfterFailure)
   expect(user.page.url()).toBe(urlAfterFailure)
+})
+
+// ---------------------------------------------------------------------------
+// Roomly: realtime room editing
+// ---------------------------------------------------------------------------
+
+test('two users edit the same room layout in real time', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [a, b] = await users(2)
+  const name = testName('Shared bedroom')
+  try {
+    const id = await createRoom(a.page, name)
+    await waitEditable(a.page)
+
+    // B opens the shared URL and can edit too (authenticated-link model).
+    await b.page.goto(`/rooms/${id}`)
+    await expect(b.page.getByTestId('room-title')).toHaveText(name)
+    await waitEditable(b.page)
+
+    // Presence: each sees the other.
+    await expect(a.page.getByTestId('peer-avatars')).toBeVisible({ timeout: 15_000 })
+    await expect(b.page.getByTestId('peer-avatars')).toBeVisible({ timeout: 15_000 })
+
+    // A adds a bed -> B sees it.
+    await a.page.getByTestId('add-bed').click()
+    const aBed = a.page.locator('[data-testid="furniture"][data-kind="bed"]')
+    const bBed = b.page.locator('[data-testid="furniture"][data-kind="bed"]')
+    await expect(aBed).toHaveCount(1)
+    await expect(bBed).toHaveCount(1, { timeout: 10_000 })
+
+    // A drags it -> B sees the new position (room coordinates, not pixels).
+    const before = await aBed.getAttribute('data-x')
+    await dragBy(a.page, aBed, -120, 0)
+    await expect.poll(() => aBed.getAttribute('data-x')).not.toBe(before)
+    const movedX = await aBed.getAttribute('data-x')
+    await expect.poll(() => bBed.getAttribute('data-x'), { timeout: 10_000 }).toBe(movedX)
+
+    // A rotates -> B sees rotation.
+    await a.page.getByTestId('rotate-right').click()
+    await expect(aBed).toHaveAttribute('data-rot', '90')
+    await expect(bBed).toHaveAttribute('data-rot', '90', { timeout: 10_000 })
+
+    // B adds a desk (auto-selected) -> A sees it; B deletes it -> A sees it gone.
+    const aDesk = a.page.locator('[data-testid="furniture"][data-kind="desk"]')
+    await b.page.getByTestId('add-desk').click()
+    await expect(aDesk).toHaveCount(1, { timeout: 10_000 })
+    await b.page.getByTestId('delete-item').click()
+    await expect(aDesk).toHaveCount(0, { timeout: 10_000 })
+    await expect(aBed).toHaveCount(1)
+
+    // The room now appears on B's dashboard under "Shared with you".
+    await b.page.goto('/rooms')
+    await expect(b.page.getByText('Shared with you')).toBeVisible({ timeout: 15_000 })
+    await expect(b.page.getByTestId('room-card').filter({ hasText: name })).toBeVisible()
+  } finally {
+    await deleteRooms(a.page, [name])
+  }
+})
+
+test('layout persists across refresh, and separate rooms do not share furniture', async ({ users }) => {
+  test.setTimeout(120_000)
+  const [a] = await users(1)
+  const n1 = testName('Room one')
+  const n2 = testName('Room two')
+  try {
+    const id1 = await createRoom(a.page, n1)
+    await waitEditable(a.page)
+    await a.page.getByTestId('add-sofa').click()
+    const sofa = a.page.locator('[data-testid="furniture"][data-kind="sofa"]')
+    await expect(sofa).toHaveCount(1)
+    await dragBy(a.page, sofa, 0, 80)
+    await a.page.getByTestId('rotate-right').click()
+    await expect(sofa).toHaveAttribute('data-rot', '90')
+    const y = await sofa.getAttribute('data-y')
+
+    // Refresh: same position and rotation come back from the CanvasRoom.
+    await a.page.reload()
+    await expect(sofa).toHaveCount(1, { timeout: 15_000 })
+    await expect(sofa).toHaveAttribute('data-rot', '90')
+    await expect(sofa).toHaveAttribute('data-y', y!)
+
+    // A second room starts empty and its edits don't leak into the first.
+    const id2 = await createRoom(a.page, n2)
+    expect(id2).not.toBe(id1)
+    await waitEditable(a.page)
+    await expect(a.page.getByTestId('furniture')).toHaveCount(0)
+    await a.page.getByTestId('add-chair').click()
+    await expect(a.page.getByTestId('furniture')).toHaveCount(1)
+
+    await a.page.goto(`/rooms/${id1}`)
+    await expect(a.page.locator('[data-testid="furniture"][data-kind="sofa"]')).toHaveCount(1, { timeout: 15_000 })
+    await expect(a.page.locator('[data-testid="furniture"][data-kind="chair"]')).toHaveCount(0)
+  } finally {
+    await deleteRooms(a.page, [n1, n2])
+  }
+})
+
+test('undo reverts the last move for the user who made it', async ({ users }) => {
+  test.setTimeout(90_000)
+  const [a] = await users(1)
+  const name = testName('Undo room')
+  try {
+    await createRoom(a.page, name)
+    await waitEditable(a.page)
+    await a.page.getByTestId('add-chair').click()
+    const chair = a.page.locator('[data-testid="furniture"][data-kind="chair"]')
+    await expect(chair).toHaveCount(1)
+    const x0 = await chair.getAttribute('data-x')
+    await dragBy(a.page, chair, 100, 0)
+    await expect.poll(() => chair.getAttribute('data-x')).not.toBe(x0)
+    await a.page.getByRole('button', { name: 'Undo' }).click()
+    await expect.poll(() => chair.getAttribute('data-x'), { timeout: 10_000 }).toBe(x0)
+    await a.page.getByRole('button', { name: 'Redo' }).click()
+    await expect.poll(() => chair.getAttribute('data-x'), { timeout: 10_000 }).not.toBe(x0)
+  } finally {
+    await deleteRooms(a.page, [name])
+  }
 })

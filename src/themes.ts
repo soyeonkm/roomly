@@ -18,6 +18,11 @@
 
 export const THEMES = [
   {
+    id: 'linen',
+    label: 'Linen',
+    description: 'Roomly: warm off-white with sage and terracotta accents.',
+  },
+  {
     id: 'slate',
     label: 'Slate',
     description: 'Neutral dark placeholder default. Replace with your own theme.',

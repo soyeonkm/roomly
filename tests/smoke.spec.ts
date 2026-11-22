@@ -63,6 +63,15 @@ test.describe('Smoke tests', () => {
     await expect(page.getByTestId('nav-user-name')).toHaveCount(0)
   })
 
+  test('room routes are gated for signed-out visitors', async ({ page }) => {
+    for (const path of ['/rooms', '/rooms/does-not-exist']) {
+      await page.goto(path)
+      await expect(page.getByText('Sign in to continue')).toBeVisible({ timeout: 15000 })
+      await expect(page.getByTestId('create-room-form')).toHaveCount(0)
+      await expect(page.getByTestId('room-editor')).toHaveCount(0)
+    }
+  })
+
   test('unknown route shows 404', async ({ page }) => {
     await page.goto('/nonexistent-page-xyz')
     await waitForApp(page)

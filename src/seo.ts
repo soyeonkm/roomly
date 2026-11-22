@@ -17,16 +17,14 @@
  * restrictions require separate controls.
  */
 
-import { APP_NAME } from './constants'
-
 /** Injected by prerender.ts: `https://<name>.app.space` from wrangler.toml, or
  *  what `deepspace deploy` passes (staging: spacestest.com). Absent in unit
  *  tests, hence the guard. */
 declare const __DEEPSPACE_SITE_ORIGIN__: string | undefined
 
 export const seo = {
-  title: APP_NAME,
-  description: `${APP_NAME} is a real-time collaborative app.`,
+  title: 'Roomly | Collaborative room planner',
+  description: 'Plan a room with your roommate in real time: draw the floor, drop in furniture, drag and rotate pieces, and see each other\'s changes live.',
   /** Public origin for canonical URLs, og:url, and the sitemap — no trailing
    *  slash. Replace with the custom domain once one is attached, e.g.
    *  'https://www.example.com'. */

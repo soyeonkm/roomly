@@ -44,3 +44,39 @@
   --color-shell: #fafafa;
   --color-shell-panel: #ffffff;
 }
+
+/* Linen — Roomly's theme: warm off-white, sage primary, muted terracotta accent. */
+[data-theme="linen"] {
+  color-scheme: light;
+  --color-background: #f7f3ec;
+  --color-foreground: #2c2a26;
+  --color-card: #fffdf9;
+  --color-card-foreground: #2c2a26;
+  --color-popover: #fffdf9;
+  --color-popover-foreground: #2c2a26;
+  --color-primary: #5f7d5e;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #e7ede4;
+  --color-secondary-foreground: #2f3f2e;
+  --color-muted: #efe9df;
+  --color-muted-foreground: #6e675c;
+  --color-accent: #f3e4da;
+  --color-accent-foreground: #5c2f1e;
+  --color-destructive: #b4472c;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e5ddd0;
+  --color-input: #ddd3c4;
+  --color-ring: #5f7d5e;
+  --radius: 0.625rem;
+  --shadow-card: 0 1px 2px 0 rgba(70, 55, 35, 0.05);
+  --shadow-card-hover: 0 6px 20px -6px rgba(70, 55, 35, 0.18);
+  --color-shell: #f1ece3;
+  --color-shell-panel: #fffdf9;
+  /* Floor-plan tokens */
+  --color-canvas: #f1ece3;
+  --color-floor: #fffdf8;
+  --color-wall: #4a4640;
+  --color-grid: #ece5d9;
+  --color-grid-strong: #ddd3c3;
+  --color-accent-strong: #c47a5a;
+}

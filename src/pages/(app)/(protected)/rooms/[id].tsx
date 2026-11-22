@@ -1,0 +1,639 @@
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react'
+import { Link, useParams } from 'react-router-dom'
+import { getUserColor, useAuthProfileReady, useMutations, usePresenceRoom, useQuery } from 'deepspace'
+import {
+  AlertTriangle, ArrowLeft, Grid3x3, Link2, Maximize, Minus, Plus, Redo2, RotateCcw, RotateCw, Trash2, Undo2, WifiOff,
+} from 'lucide-react'
+import { Button, Input, Label, useToast } from '@/components/ui'
+import { cn } from '@/lib/utils'
+import { FurnitureArt, FurnitureIcon } from '@/components/room/FurnitureArt'
+import {
+  bounds, findIssues, footprintSize, formatM, nextRot, normRot, parseRoomDims, placeCenter, PRESET_BY_KIND, PRESETS,
+  type Item, type Kind, type Rot,
+} from '@/lib/room-geometry'
+import { useRoomCanvas } from '@/lib/use-room-canvas'
+import type { Room } from '@/schemas/rooms-schema'
+
+type Pt = { x: number; y: number }
+type DragState = { id: string; x: number; y: number; rot: Rot }
+type PeerState = { cursor?: Pt | null; drag?: DragState | null; selected?: string | null }
+
+const PAD = 70 // cm of margin around the room inside the SVG
+
+export default function RoomEditorPage() {
+  const { id = '' } = useParams()
+  const { records, status, error } = useQuery<Room>('rooms')
+  const room = records.find((r) => r.recordId === id)
+
+  if (status === 'loading') return <CenteredNote>Loading room…</CenteredNote>
+  if (status === 'error') return <CenteredNote tone="error">Couldn't load this room: {error}</CenteredNote>
+  if (!room) {
+    return (
+      <CenteredNote>
+        <span data-testid="room-not-found">This room doesn't exist or was deleted.</span>{' '}
+        <Link to="/rooms" className="text-primary underline underline-offset-4">Back to rooms</Link>
+      </CenteredNote>
+    )
+  }
+  // key: a different room id remounts the editor so no state leaks between rooms.
+  return <Editor key={id} roomId={id} room={room.data} createdBy={room.createdBy} />
+}
+
+function Editor({ roomId, room, createdBy }: { roomId: string; room: Room; createdBy: string }) {
+  const toast = useToast()
+  const { userId } = useAuthProfileReady()
+  const { items, connected, canWrite, add, move, rotate, remove, undo, redo } = useRoomCanvas(roomId)
+  const { peers, updateState, connected: presenceConnected } = usePresenceRoom(`room:${roomId}`)
+  const roomMut = useMutations<Room>('rooms')
+  const editable = connected && canWrite
+
+  const [selected, setSelected] = useState<string | null>(null)
+  const [drag, setDrag] = useState<DragState | null>(null)
+  const [snapOn, setSnapOn] = useState(true)
+  const [zoom, setZoom] = useState(1)
+
+  const W = Math.min(Math.max(room.widthCm, 100), 3000)
+  const L = Math.min(Math.max(room.lengthCm, 100), 3000)
+  const dims = useMemo(() => ({ widthCm: W, lengthCm: L }), [W, L])
+
+  // Record that this user opened the room, so it shows on their dashboard.
+  const joined = useRef(false)
+  useEffect(() => {
+    if (joined.current || !roomMut.ready || !userId || userId === createdBy) return
+    const c = room.collaborators ?? []
+    joined.current = true
+    // ponytail: read-modify-write on a JSON list; two simultaneous first visits can drop one id.
+    if (!c.includes(userId)) roomMut.put(roomId, { collaborators: [...c, userId] })
+  }, [roomMut, userId, createdBy, room.collaborators, roomId])
+
+  // One live position per item: local drag > a peer's in-flight drag > canvas.
+  const uniquePeers = useMemo(() => {
+    const m = new Map<string, (typeof peers)[number]>()
+    for (const p of peers) if (p.userId !== userId) m.set(p.userId, p)
+    return [...m.values()]
+  }, [peers, userId])
+
+  const liveItems = useMemo(() => {
+    const peerDrags = new Map<string, DragState>()
+    for (const p of uniquePeers) {
+      const d = (p.state as PeerState).drag
+      if (d && typeof d.x === 'number') peerDrags.set(d.id, d)
+    }
+    return items.map((it) => {
+      if (drag?.id === it.id) return { ...it, x: drag.x, y: drag.y, rot: drag.rot }
+      const pd = peerDrags.get(it.id)
+      return pd ? { ...it, x: pd.x, y: pd.y, rot: normRot(pd.rot) } : it
+    })
+  }, [items, drag, uniquePeers])
+
+  const issues = useMemo(() => findIssues(liveItems, dims), [liveItems, dims])
+  const sel = liveItems.find((i) => i.id === selected) ?? null
+
+  useEffect(() => { updateState({ selected }) }, [selected, updateState, presenceConnected])
+
+  // --- actions ------------------------------------------------------------
+  const addItem = useCallback(
+    (kind: Kind) => {
+      if (!editable) return
+      const p = PRESET_BY_KIND[kind]
+      const c = placeCenter({ ...p, rot: 0 }, W / 2, L / 2, dims, snapOn)
+      setSelected(add(kind, c.x, c.y))
+    },
+    [editable, add, W, L, dims, snapOn],
+  )
+
+  const rotateSel = useCallback(
+    (dir: 1 | -1) => {
+      if (!editable || !sel) return
+      rotate(sel.id, nextRot(sel.rot, dir))
+    },
+    [editable, sel, rotate],
+  )
+
+  const deleteSel = useCallback(() => {
+    if (!editable || !sel) return
+    remove(sel.id)
+    setSelected(null)
+  }, [editable, sel, remove])
+
+  const nudge = useCallback(
+    (dx: number, dy: number) => {
+      if (!editable || !sel) return
+      const c = placeCenter(sel, sel.x + dx, sel.y + dy, dims, false)
+      if (c.x !== sel.x || c.y !== sel.y) move(sel.id, c.x, c.y)
+    },
+    [editable, sel, dims, move],
+  )
+
+  // --- keyboard -----------------------------------------------------------
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement
+      if (t.closest('input, textarea, [contenteditable="true"]')) return
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (editable) (e.shiftKey ? redo : undo)() }
+      else if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); if (editable) redo() }
+      else if (e.key === 'r' || e.key === 'R') rotateSel(e.shiftKey ? -1 : 1)
+      else if (e.key === 'Delete' || e.key === 'Backspace') { if (sel) { e.preventDefault(); deleteSel() } }
+      else if (e.key === 'Escape') setSelected(null)
+      else if (e.key.startsWith('Arrow') && sel) {
+        e.preventDefault()
+        const step = e.shiftKey ? 50 : 10
+        nudge(e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0, e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [editable, undo, redo, rotateSel, deleteSel, nudge, sel])
+
+  // --- share --------------------------------------------------------------
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(window.location.href)
+      toast.success('Link copied', 'Anyone signed in with this link can edit this room.')
+    } catch {
+      toast.info('Copy this link', window.location.href)
+    }
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background" data-testid="room-editor" data-can-write={String(editable)}>
+      {/* Top bar */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card/70 px-3 py-2 backdrop-blur sm:px-4">
+        <Link to="/rooms" aria-label="Back to rooms" className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-foreground">
+          <ArrowLeft className="size-4" />
+        </Link>
+        <div className="mr-auto min-w-0">
+          <h1 className="truncate font-display text-xl leading-tight text-foreground" data-testid="room-title">{room.name}</h1>
+          <p className="text-xs text-muted-foreground">{formatM(W)} × {formatM(L)} · {liveItems.length} item{liveItems.length === 1 ? '' : 's'}</p>
+        </div>
+        <PeerAvatars peers={uniquePeers} />
+        <ConnectionBadge connected={connected} canWrite={canWrite} />
+        <div className="flex items-center gap-1">
+          <Button size="icon" variant="ghost" aria-label="Undo" title="Undo (⌘Z)" disabled={!editable} onClick={undo}><Undo2 /></Button>
+          <Button size="icon" variant="ghost" aria-label="Redo" title="Redo (⇧⌘Z)" disabled={!editable} onClick={redo}><Redo2 /></Button>
+        </div>
+        <Button size="sm" variant="outline" onClick={copyLink} data-testid="share-button"><Link2 /> Share</Button>
+      </div>
+
+      {!connected && (
+        <div role="status" className="flex items-center gap-2 bg-warning/15 px-4 py-1.5 text-xs text-foreground">
+          <WifiOff className="size-3.5" /> Connecting to the room… editing is paused until the connection is back.
+        </div>
+      )}
+
+      <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[208px_1fr_288px]">
+        {/* Palette */}
+        <aside aria-label="Furniture" className="border-b border-border bg-card/50 lg:border-b-0 lg:border-r">
+          <p className="hidden px-4 pt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground lg:block">Furniture</p>
+          <div className="flex gap-2 overflow-x-auto p-3 lg:grid lg:grid-cols-2 lg:overflow-visible">
+            {PRESETS.map((p) => (
+              <button
+                key={p.kind}
+                data-testid={`add-${p.kind}`}
+                disabled={!editable}
+                onClick={() => addItem(p.kind)}
+                title={`Add ${p.label} (${p.hint})`}
+                className="group flex w-20 shrink-0 flex-col items-center gap-1 rounded-xl border border-border bg-card p-2 text-xs text-foreground transition hover:border-primary/60 hover:shadow-[0_6px_20px_-6px_rgba(70,55,35,0.18)] disabled:cursor-not-allowed disabled:opacity-50 lg:w-auto"
+              >
+                <span className="flex h-12 w-full items-center justify-center"><span className="h-full w-12"><FurnitureIcon kind={p.kind} w={p.width} h={p.height} /></span></span>
+                <span className="font-medium">{p.label}</span>
+              </button>
+            ))}
+          </div>
+          <p className="hidden px-4 pb-4 text-[11px] leading-relaxed text-muted-foreground lg:block">
+            Click to add at the room's center, then drag into place. <kbd>R</kbd> rotates, arrows nudge, <kbd>Del</kbd> removes.
+          </p>
+        </aside>
+
+        {/* Canvas */}
+        <RoomSurface
+          W={W} L={L} items={liveItems} issues={issues} selected={selected} editable={editable}
+          snapOn={snapOn} zoom={zoom} peers={uniquePeers} dims={dims}
+          onSelect={setSelected}
+          onDrag={(d) => { setDrag(d); updateState({ drag: d }) }}
+          onDrop={(d, moved) => {
+            setDrag(null)
+            updateState({ drag: null })
+            if (moved) move(d.id, d.x, d.y)
+          }}
+          onCursor={(c) => updateState({ cursor: c })}
+          toolbar={
+            <div className="absolute bottom-3 left-3 flex items-center gap-1 rounded-xl border border-border bg-card/90 p-1 shadow-[0_1px_2px_rgba(70,55,35,0.05)] backdrop-blur">
+              <Button size="icon" variant="ghost" className="size-8" aria-label="Zoom out" onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.25).toFixed(2)))}><Minus /></Button>
+              <span className="w-12 text-center text-xs tabular-nums text-muted-foreground">{Math.round(zoom * 100)}%</span>
+              <Button size="icon" variant="ghost" className="size-8" aria-label="Zoom in" onClick={() => setZoom((z) => Math.min(3, +(z + 0.25).toFixed(2)))}><Plus /></Button>
+              <Button size="icon" variant="ghost" className="size-8" aria-label="Fit room" onClick={() => setZoom(1)}><Maximize /></Button>
+              <span className="mx-1 h-5 w-px bg-border" />
+              <Button size="sm" variant={snapOn ? 'secondary' : 'ghost'} className="h-8" aria-pressed={snapOn} onClick={() => setSnapOn((s) => !s)}>
+                <Grid3x3 /> Snap
+              </Button>
+            </div>
+          }
+        />
+
+        {/* Properties */}
+        <aside aria-label="Properties" className="overflow-y-auto border-t border-border bg-card/50 p-4 lg:border-l lg:border-t-0">
+          {sel ? (
+            <ItemPanel item={sel} issues={issues} items={liveItems} editable={editable} onRotate={rotateSel} onDelete={deleteSel} onSelect={setSelected} />
+          ) : (
+            <RoomPanel roomId={roomId} room={room} editable={roomMut.ready} issues={issues} items={liveItems} onSelect={setSelected} />
+          )}
+        </aside>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+
+function RoomSurface(props: {
+  W: number; L: number; items: Item[]; issues: ReturnType<typeof findIssues>; selected: string | null
+  editable: boolean; snapOn: boolean; zoom: number; dims: { widthCm: number; lengthCm: number }
+  peers: { userId: string; userName: string; state: Record<string, unknown> }[]
+  onSelect: (id: string | null) => void
+  onDrag: (d: DragState) => void
+  onDrop: (d: DragState, moved: boolean) => void
+  onCursor: (c: Pt | null) => void
+  toolbar: React.ReactNode
+}) {
+  const { W, L, items, issues, selected, editable, snapOn, zoom, dims, peers, onSelect, onDrag, onDrop, onCursor } = props
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const svgRef = useRef<SVGSVGElement>(null)
+  const [box, setBox] = useState({ w: 800, h: 600 })
+  const dragRef = useRef<{ item: Item; dx: number; dy: number; last: DragState; moved: boolean } | null>(null)
+  const cursorFrame = useRef<number | null>(null)
+  const pendingCursor = useRef<Pt | null>(null)
+
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([e]) => setBox({ w: e.contentRect.width, h: e.contentRect.height }))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const vbW = W + PAD * 2
+  const vbH = L + PAD * 2
+  const fit = Math.max(0.05, Math.min((box.w - 24) / vbW, (box.h - 24) / vbH))
+  const pxPerCm = fit * zoom
+
+  /** Screen → room cm, via the SVG's own transform: correct at any size/zoom/scroll. */
+  const toRoom = (e: { clientX: number; clientY: number }): Pt | null => {
+    const svg = svgRef.current
+    const m = svg?.getScreenCTM()
+    if (!svg || !m) return null
+    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse())
+    return { x: p.x, y: p.y }
+  }
+
+  function sendCursor(c: Pt | null) {
+    pendingCursor.current = c
+    if (cursorFrame.current !== null) return
+    cursorFrame.current = requestAnimationFrame(() => {
+      cursorFrame.current = null
+      onCursor(pendingCursor.current)
+    })
+  }
+
+  function onItemDown(e: RPointerEvent, it: Item) {
+    e.stopPropagation()
+    onSelect(it.id)
+    if (!editable || e.button !== 0) return
+    const p = toRoom(e)
+    if (!p) return
+    svgRef.current?.setPointerCapture(e.pointerId)
+    dragRef.current = { item: it, dx: p.x - it.x, dy: p.y - it.y, last: { id: it.id, x: it.x, y: it.y, rot: it.rot }, moved: false }
+  }
+
+  function onMove(e: RPointerEvent) {
+    const p = toRoom(e)
+    if (!p) return
+    sendCursor({ x: Math.round(p.x), y: Math.round(p.y) })
+    const d = dragRef.current
+    if (!d) return
+    const c = placeCenter(d.item, p.x - d.dx, p.y - d.dy, dims, snapOn)
+    if (c.x === d.last.x && c.y === d.last.y) return
+    d.moved = c.x !== d.item.x || c.y !== d.item.y
+    d.last = { id: d.item.id, x: c.x, y: c.y, rot: d.item.rot }
+    onDrag(d.last)
+  }
+
+  function onUp() {
+    const d = dragRef.current
+    dragRef.current = null
+    if (d) onDrop(d.last, d.moved)
+  }
+
+  const fontCm = Math.max(9, Math.min(16, 11 / Math.max(pxPerCm, 0.4)))
+
+  return (
+    <div ref={wrapRef} className="relative min-h-[55vh] flex-1 overflow-auto bg-[var(--color-canvas)] lg:min-h-0" data-testid="room-surface">
+      <div className="flex min-h-full min-w-full items-center justify-center p-3" style={{ width: vbW * pxPerCm + 24, height: vbH * pxPerCm + 24 }}>
+        <svg
+          ref={svgRef}
+          role="application"
+          aria-label="Room floor plan"
+          viewBox={`${-PAD} ${-PAD} ${vbW} ${vbH}`}
+          width={vbW * pxPerCm}
+          height={vbH * pxPerCm}
+          className="select-none"
+          onPointerMove={onMove}
+          onPointerUp={onUp}
+          onPointerCancel={onUp}
+          onPointerLeave={() => { if (!dragRef.current) sendCursor(null) }}
+          onPointerDown={() => onSelect(null)}
+        >
+          <defs>
+            <pattern id="grid10" width={10} height={10} patternUnits="userSpaceOnUse">
+              <path d="M10 0H0V10" fill="none" stroke="var(--color-grid)" strokeWidth={0.4} />
+            </pattern>
+            <pattern id="grid50" width={50} height={50} patternUnits="userSpaceOnUse">
+              <rect width={50} height={50} fill="url(#grid10)" />
+              <path d="M50 0H0V50" fill="none" stroke="var(--color-grid-strong)" strokeWidth={0.8} />
+            </pattern>
+            <pattern id="warn" width={8} height={8} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <rect width={8} height={8} fill="rgba(196,122,90,0.12)" />
+              <line x1={0} y1={0} x2={0} y2={8} stroke="rgba(178,84,52,0.55)" strokeWidth={2.5} />
+            </pattern>
+          </defs>
+
+          {/* Floor + walls */}
+          <rect x={-6} y={-6} width={W + 12} height={L + 12} rx={2} fill="var(--color-wall)" />
+          <rect width={W} height={L} fill="var(--color-floor)" />
+          <rect width={W} height={L} fill="url(#grid50)" />
+
+          {/* Dimensions */}
+          <DimLabel x1={0} y1={-30} x2={W} y2={-30} label={formatM(W)} fontCm={fontCm} />
+          <DimLabel x1={-30} y1={0} x2={-30} y2={L} label={formatM(L)} fontCm={fontCm} vertical />
+
+          {/* Furniture */}
+          {items.map((it) => {
+            const { w: fw, h: fh } = footprintSize(it)
+            const b = bounds(it)
+            const issue = issues.get(it.id)
+            const isSel = it.id === selected
+            const peerSel = peers.find((p) => (p.state as PeerState).selected === it.id)
+            return (
+              <g
+                key={it.id}
+                data-testid="furniture"
+                data-kind={it.kind}
+                data-x={it.x}
+                data-y={it.y}
+                data-rot={it.rot}
+                data-selected={isSel || undefined}
+                data-warning={issue ? 'true' : undefined}
+                onPointerDown={(e) => onItemDown(e, it)}
+                style={{ cursor: editable ? 'grab' : 'pointer', touchAction: 'none' }}
+              >
+                <g transform={`translate(${it.x} ${it.y}) rotate(${it.rot}) translate(${-it.width / 2} ${-it.height / 2})`}>
+                  <FurnitureArt kind={it.kind} w={it.width} h={it.height} />
+                </g>
+                {issue && <rect x={b.left} y={b.top} width={fw} height={fh} fill="url(#warn)" stroke="#b25434" strokeWidth={1.5} strokeDasharray="5 3" vectorEffect="non-scaling-stroke" rx={3} />}
+                {peerSel && !isSel && (
+                  <rect x={b.left - 3} y={b.top - 3} width={fw + 6} height={fh + 6} rx={5} fill="none" stroke={getUserColor(peerSel.userId)} strokeWidth={2} vectorEffect="non-scaling-stroke" />
+                )}
+                {isSel && (
+                  <rect x={b.left - 4} y={b.top - 4} width={fw + 8} height={fh + 8} rx={6} fill="none" stroke="var(--color-accent-strong)" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />
+                )}
+                <text
+                  x={it.x} y={it.y} textAnchor="middle" dominantBaseline="central"
+                  fontSize={Math.min(fontCm, fw / 4, fh / 2.2)}
+                  className="pointer-events-none fill-[var(--color-foreground)] font-medium"
+                  style={{ paintOrder: 'stroke', stroke: 'rgba(255,253,249,0.85)', strokeWidth: fontCm / 4 }}
+                >
+                  {PRESET_BY_KIND[it.kind].label}
+                </text>
+              </g>
+            )
+          })}
+
+          {/* Peer cursors */}
+          {peers.map((p) => {
+            const c = (p.state as PeerState).cursor
+            if (!c || typeof c.x !== 'number') return null
+            const color = getUserColor(p.userId)
+            const s = 1 / pxPerCm
+            return (
+              <g key={p.userId} transform={`translate(${c.x} ${c.y}) scale(${s})`} className="pointer-events-none" data-testid="peer-cursor">
+                <path d="M0 0 L0 16 L4.5 12 L8 19 L10.5 18 L7 11 L13 11 Z" fill={color} stroke="#fff" strokeWidth={1.2} />
+                <g transform="translate(14 14)">
+                  <rect height={18} width={p.userName.length * 6.5 + 12} rx={9} fill={color} />
+                  <text x={6} y={12.5} fontSize={11} fill="#fff" fontWeight={600}>{p.userName}</text>
+                </g>
+              </g>
+            )
+          })}
+        </svg>
+      </div>
+      {props.toolbar}
+    </div>
+  )
+}
+
+function DimLabel({ x1, y1, x2, y2, label, fontCm, vertical }: { x1: number; y1: number; x2: number; y2: number; label: string; fontCm: number; vertical?: boolean }) {
+  const mx = (x1 + x2) / 2
+  const my = (y1 + y2) / 2
+  const t = 6
+  return (
+    <g className="pointer-events-none" stroke="var(--color-muted-foreground)" strokeWidth={1} vectorEffect="non-scaling-stroke">
+      <line x1={x1} y1={y1} x2={x2} y2={y2} vectorEffect="non-scaling-stroke" />
+      {vertical ? (
+        <><line x1={x1 - t} x2={x1 + t} y1={y1} y2={y1} vectorEffect="non-scaling-stroke" /><line x1={x1 - t} x2={x1 + t} y1={y2} y2={y2} vectorEffect="non-scaling-stroke" /></>
+      ) : (
+        <><line x1={x1} x2={x1} y1={y1 - t} y2={y1 + t} vectorEffect="non-scaling-stroke" /><line x1={x2} x2={x2} y1={y1 - t} y2={y1 + t} vectorEffect="non-scaling-stroke" /></>
+      )}
+      <text
+        x={mx} y={my} textAnchor="middle" dominantBaseline="central" fontSize={fontCm} stroke="var(--color-canvas)" strokeWidth={fontCm / 2.5}
+        transform={vertical ? `rotate(-90 ${mx} ${my})` : undefined}
+        style={{ paintOrder: 'stroke' }} className="fill-[var(--color-muted-foreground)]"
+      >
+        {label}
+      </text>
+    </g>
+  )
+}
+
+function ItemPanel({ item, issues, items, editable, onRotate, onDelete, onSelect }: {
+  item: Item; issues: ReturnType<typeof findIssues>; items: Item[]; editable: boolean
+  onRotate: (dir: 1 | -1) => void; onDelete: () => void; onSelect: (id: string) => void
+}) {
+  const p = PRESET_BY_KIND[item.kind]
+  const { w, h } = footprintSize(item)
+  const b = bounds(item)
+  const issue = issues.get(item.id)
+  return (
+    <div className="space-y-5" data-testid="item-panel">
+      <div className="flex items-center gap-3">
+        <div className="size-14 rounded-xl border border-border bg-card p-1.5"><FurnitureIcon kind={item.kind} w={item.width} h={item.height} /></div>
+        <div>
+          <h2 className="font-display text-xl text-foreground">{p.label}</h2>
+          <p className="text-xs text-muted-foreground">{w} × {h} cm</p>
+        </div>
+      </div>
+      <dl className="grid grid-cols-3 gap-2 text-sm">
+        <Stat label="From left" value={`${Math.round(b.left)} cm`} />
+        <Stat label="From top" value={`${Math.round(b.top)} cm`} />
+        <Stat label="Rotation" value={`${item.rot}°`} testId="item-rotation" />
+      </dl>
+      <div className="grid grid-cols-2 gap-2">
+        <Button variant="outline" disabled={!editable} onClick={() => onRotate(-1)} aria-label="Rotate left"><RotateCcw /> 90°</Button>
+        <Button variant="outline" disabled={!editable} onClick={() => onRotate(1)} aria-label="Rotate right" data-testid="rotate-right"><RotateCw /> 90°</Button>
+      </div>
+      <Warnings issue={issue} items={items} onSelect={onSelect} />
+      <Button variant="ghost" className="w-full text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={!editable} onClick={onDelete} data-testid="delete-item">
+        <Trash2 /> Remove {p.label.toLowerCase()}
+      </Button>
+    </div>
+  )
+}
+
+function Warnings({ issue, items, onSelect }: { issue?: { outOfBounds: boolean; overlapsWith: string[] }; items: Item[]; onSelect: (id: string) => void }) {
+  if (!issue) return null
+  return (
+    <div role="status" className="space-y-1 rounded-xl border border-[#e3b8a4] bg-[#f8e9e1] p-3 text-sm text-[#7a3a22]">
+      {issue.outOfBounds && <p className="flex gap-2"><AlertTriangle className="mt-0.5 size-4 shrink-0" /> Extends past the walls.</p>}
+      {issue.overlapsWith.length > 0 && (
+        <p className="flex flex-wrap gap-x-1 gap-y-0.5">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" /> Overlaps
+          {issue.overlapsWith.map((id, i) => {
+            const o = items.find((x) => x.id === id)
+            return o ? <button key={id} className="underline underline-offset-2" onClick={() => onSelect(id)}>{PRESET_BY_KIND[o.kind].label.toLowerCase()}{i < issue.overlapsWith.length - 1 ? ',' : ''}</button> : null
+          })}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function RoomPanel({ roomId, room, editable, issues, items, onSelect }: {
+  roomId: string; room: Room; editable: boolean; issues: ReturnType<typeof findIssues>; items: Item[]; onSelect: (id: string) => void
+}) {
+  const toast = useToast()
+  const { putConfirmed } = useMutations<Room>('rooms')
+  const [name, setName] = useState(room.name)
+  const [w, setW] = useState(String(room.widthCm / 100))
+  const [l, setL] = useState(String(room.lengthCm / 100))
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  // Follow remote edits to the room record.
+  useEffect(() => { setName(room.name); setW(String(room.widthCm / 100)); setL(String(room.lengthCm / 100)) }, [room.name, room.widthCm, room.lengthCm])
+
+  const dirty = name.trim() !== room.name || w !== String(room.widthCm / 100) || l !== String(room.lengthCm / 100)
+
+  async function save() {
+    const dims = parseRoomDims(w, l)
+    if (!name.trim()) return setErr('Name is required.')
+    if (typeof dims === 'string') return setErr(dims)
+    setErr(null)
+    setSaving(true)
+    try {
+      await putConfirmed(roomId, { name: name.trim().slice(0, 80), ...dims })
+      toast.success('Room updated')
+    } catch (e) {
+      toast.error('Could not update room', e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const flagged = items.filter((i) => issues.has(i.id))
+
+  return (
+    <div className="space-y-6" data-testid="room-panel">
+      <div>
+        <h2 className="font-display text-xl text-foreground">Room</h2>
+        <p className="text-xs text-muted-foreground">Select a piece of furniture to edit it.</p>
+      </div>
+      <div className="space-y-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="rp-name">Name</Label>
+          <Input id="rp-name" value={name} maxLength={80} disabled={!editable} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="rp-w">Width (m)</Label>
+            <Input id="rp-w" type="number" step="0.1" min="1" max="30" value={w} disabled={!editable} onChange={(e) => setW(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="rp-l">Length (m)</Label>
+            <Input id="rp-l" type="number" step="0.1" min="1" max="30" value={l} disabled={!editable} onChange={(e) => setL(e.target.value)} />
+          </div>
+        </div>
+        {err && <p role="alert" className="text-sm text-destructive">{err}</p>}
+        <Button className="w-full" disabled={!editable || !dirty} loading={saving} onClick={save}>Save room</Button>
+      </div>
+
+      <div>
+        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Layout check</h3>
+        {items.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Empty room. Add furniture from the palette.</p>
+        ) : flagged.length === 0 ? (
+          <p className="text-sm text-primary" data-testid="layout-ok">Everything fits — no overlaps.</p>
+        ) : (
+          <ul className="space-y-1.5" data-testid="layout-warnings">
+            {flagged.map((i) => {
+              const iss = issues.get(i.id)!
+              return (
+                <li key={i.id}>
+                  <button onClick={() => onSelect(i.id)} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm text-[#7a3a22] hover:bg-[#f8e9e1]">
+                    <AlertTriangle className="size-4 shrink-0" />
+                    <span>{PRESET_BY_KIND[i.kind].label}: {[iss.outOfBounds && 'past the walls', iss.overlapsWith.length > 0 && 'overlapping'].filter(Boolean).join(', ')}</span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+
+      <p className="rounded-xl bg-muted/70 p-3 text-xs leading-relaxed text-muted-foreground">
+        <strong className="font-medium text-foreground">Link sharing.</strong> Anyone signed in to Roomly with this
+        room's link can view and edit it. Rooms are not private.
+      </p>
+    </div>
+  )
+}
+
+function Stat({ label, value, testId }: { label: string; value: string; testId?: string }) {
+  return (
+    <div className="rounded-lg bg-muted/70 px-2.5 py-2">
+      <dt className="text-[11px] text-muted-foreground">{label}</dt>
+      <dd className="font-medium tabular-nums text-foreground" data-testid={testId}>{value}</dd>
+    </div>
+  )
+}
+
+function PeerAvatars({ peers }: { peers: { userId: string; userName: string }[] }) {
+  if (peers.length === 0) return null
+  return (
+    <div className="flex -space-x-2" data-testid="peer-avatars" aria-label={`${peers.length} other ${peers.length === 1 ? 'person' : 'people'} here`}>
+      {peers.slice(0, 4).map((p) => (
+        <span
+          key={p.userId}
+          title={p.userName}
+          className="flex size-8 items-center justify-center rounded-full border-2 border-card text-xs font-semibold text-white"
+          style={{ background: getUserColor(p.userId) }}
+        >
+          {(p.userName?.[0] ?? '?').toUpperCase()}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function ConnectionBadge({ connected, canWrite }: { connected: boolean; canWrite: boolean }) {
+  const [label, tone] = !connected ? ['Connecting', 'bg-warning'] : canWrite ? ['Live', 'bg-primary'] : ['View only', 'bg-muted-foreground']
+  return (
+    <span className="hidden items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground sm:inline-flex" data-testid="connection-status">
+      <span className={cn('size-2 rounded-full', tone, connected && canWrite && 'animate-pulse')} />
+      {label}
+    </span>
+  )
+}
+
+function CenteredNote({ children, tone }: { children: React.ReactNode; tone?: 'error' }) {
+  return <div className={cn('flex h-full items-center justify-center p-8 text-center text-sm', tone === 'error' ? 'text-destructive' : 'text-muted-foreground')}>{children}</div>
+}
