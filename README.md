@@ -4,6 +4,9 @@ Plan a shared room with your roommate in real time. Sketch the floor plan, drop 
 
 **Live:** https://roomly.app.space
 
+<img width="1512" height="738" alt="Screenshot 2026-11-22 at 6 59 36 PM" src="https://github.com/user-attachments/assets/2f546dc9-3237-4300-a06b-5978d5184ac7" />
+
+
 ## Features
 
 - **Rooms with real dimensions.** Create a room in metres; everything inside is measured in centimetres on a 10 cm grid.
